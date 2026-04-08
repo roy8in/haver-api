@@ -1,0 +1,6 @@
+pandas>=2.0.3
+numpy>=1.24.4
+python-dotenv
+requests
+# Haver package should be installed separately via:
+# pip install Haver --extra-index-url http://www.haver.com/Python --trusted-host www.haver.com
