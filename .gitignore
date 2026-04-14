@@ -3,3 +3,6 @@
 __pycache__/
 *.pyc
 .gitignore
+tickers.csv
+*.csv
+*.xlsx
