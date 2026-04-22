@@ -1,71 +1,151 @@
-import Haver
 import pandas as pd
-from datetime import datetime, timedelta
+import Haver
+
+from run_logging import get_logger, log_event
+
+
+logger = get_logger("haver")
+
 
 def initialize():
-    """Haver 초기화 (웹 버전용)"""
+    """Initialize the Haver client."""
     try:
         Haver.direct(1)
+        log_event(logger, "info", "Initialized Haver client")
         return True
     except Exception as e:
-        print(f"⚠️ Haver Initialization Error: {e}")
+        log_event(logger, "error", "Haver initialization error", error=str(e))
         return False
 
+
 def fetch_metadata(ticker_list):
-    """티커 리스트에 대한 메타데이터 수집"""
+    """Fetch metadata for the requested ticker list."""
+    log_event(logger, "info", "Fetching metadata", ticker_count=len(ticker_list))
     try:
         meta_df = Haver.metadata(ticker_list)
-        
-        # Haver API가 에러 리포트(dict)를 반환하는 경우 (잘못된 티커 포함 시)
         if isinstance(meta_df, dict):
-            print(f"⚠️ Metadata fetch failed. Some tickers might be invalid. Run check_tickers.py.")
+            log_event(logger, "error", "Metadata fetch returned error payload")
             return pd.DataFrame()
-            
-        if meta_df is not None and not meta_df.empty:
-            meta_df.columns = [c.lower() for c in meta_df.columns]
-            if 'database' in meta_df.columns and 'code' in meta_df.columns:
-                meta_df['ticker_pk'] = meta_df['database'] + ':' + meta_df['code']
-            return meta_df
-        
-        return pd.DataFrame()
+        if not isinstance(meta_df, pd.DataFrame) or meta_df.empty:
+            log_event(logger, "warning", "Metadata fetch returned no rows")
+            return pd.DataFrame()
+
+        meta_df = meta_df.copy()
+        meta_df.columns = [c.lower() for c in meta_df.columns]
+        required_columns = {"database", "code"}
+        missing_columns = required_columns.difference(meta_df.columns)
+        if missing_columns:
+            log_event(logger, "error", "Metadata response missing required columns", missing_columns=sorted(missing_columns))
+            return pd.DataFrame()
+
+        meta_df["ticker_pk"] = _build_ticker_pks(meta_df, ticker_list)
+        log_event(logger, "info", "Metadata fetch complete", metadata_rows=len(meta_df))
+        return meta_df
     except Exception as e:
-        print(f"❌ Exception in fetch_metadata: {e}")
+        log_event(logger, "error", "Exception in fetch_metadata", error=str(e))
         return pd.DataFrame()
+
+
+def _build_ticker_pks(meta_df, ticker_list):
+    res_pks = []
+    lower_lookup = [(orig, orig.lower()) for orig in ticker_list]
+
+    for _, row in meta_df.iterrows():
+        database = str(row["database"]).lower()
+        code = str(row["code"]).lower()
+
+        if "(" in code or "%" in code:
+            matched_orig = None
+            code_prefix = code.split("(", 1)[0]
+            for original, original_lower in lower_lookup:
+                if database in original_lower and code_prefix in original_lower:
+                    matched_orig = original
+                    break
+            res_pks.append(matched_orig or f"{database}:{code}")
+        else:
+            res_pks.append(f"{database}:{code}")
+
+    return res_pks
+
 
 def fetch_series_data(ticker_chunk, start_date):
-    """시계열 데이터 수집"""
+    """Fetch time-series data, falling back to per-ticker requests on chunk failure."""
+    log_event(logger, "info", "Fetching series chunk", ticker_count=len(ticker_chunk), start_date=start_date)
     try:
         data = Haver.data(ticker_chunk, startdate=start_date, dates=True)
-        return _process_haver_data(data, ticker_chunk)
-    except Exception as e:
-        # 데이터 수집 실패 시 개별 재시도 로직은 안정성을 위해 유지하거나, 
-        # 원하신다면 이 부분도 더 단순화할 수 있습니다. 
-        # 현재는 청크 전체 실패 시 개별 조회를 시도하는 로직입니다.
-        combined_results = []
-        for ticker in ticker_chunk:
-            try:
-                single_data = Haver.data([ticker], startdate=start_date, dates=True)
-                processed = _process_haver_data(single_data, [ticker])
-                if not processed.empty:
-                    combined_results.append(processed)
-            except Exception:
-                continue
-        
-        if combined_results:
-            return pd.concat(combined_results, ignore_index=True)
-        return pd.DataFrame()
+        processed = _process_haver_data(data, ticker_chunk)
+        log_event(logger, "info", "Chunk fetch complete", ticker_count=len(ticker_chunk), rows=len(processed))
+        return processed
+    except Exception as exc:
+        log_event(
+            logger,
+            "warning",
+            "Chunk fetch failed, switching to per-ticker fallback",
+            ticker_count=len(ticker_chunk),
+            start_date=start_date,
+            error=str(exc),
+        )
+
+    combined_results = []
+    failed_tickers = []
+    for ticker in ticker_chunk:
+        try:
+            single_data = Haver.data([ticker], startdate=start_date, dates=True)
+            processed = _process_haver_data(single_data, [ticker])
+            if not processed.empty:
+                combined_results.append(processed)
+        except Exception as exc:
+            failed_tickers.append((ticker, str(exc)))
+
+    if failed_tickers:
+        failed_names = ", ".join(ticker for ticker, _ in failed_tickers[:10])
+        log_event(
+            logger,
+            "warning",
+            "Per-ticker fallback had failures",
+            failed_count=len(failed_tickers),
+            failed_names=failed_names,
+        )
+
+    if combined_results:
+        combined = pd.concat(combined_results, ignore_index=True)
+        log_event(logger, "info", "Per-ticker fallback complete", rows=len(combined))
+        return combined
+    return pd.DataFrame()
+
 
 def _process_haver_data(data, ticker_names):
-    """Haver 데이터를 Long-form DataFrame으로 변환"""
-    if data is None or data.empty:
+    """Convert Haver data into a long-form dataframe."""
+    if data is None:
         return pd.DataFrame()
 
-    data.columns = ticker_names
-    long_df = data.reset_index().rename(columns={'index': 'date'})
-    long_df = pd.melt(long_df, id_vars=['date'], var_name='ticker_pk', value_name='value')
-    
-    long_df = long_df.dropna(subset=['value'])
-    if not long_df.empty:
-        long_df['date'] = pd.to_datetime(long_df['date']).dt.strftime('%Y-%m-%d')
-    
+    if isinstance(data, pd.Series):
+        data = data.to_frame()
+    if not isinstance(data, pd.DataFrame) or data.empty:
+        return pd.DataFrame()
+
+    normalized = data.copy()
+    if normalized.shape[1] != len(ticker_names):
+        log_event(
+            logger,
+            "warning",
+            "Haver data column mismatch",
+            expected_columns=len(ticker_names),
+            actual_columns=normalized.shape[1],
+        )
+        return pd.DataFrame()
+
+    normalized.columns = ticker_names
+    long_df = normalized.reset_index().rename(columns={"index": "date"})
+    if "date" not in long_df.columns:
+        first_column = long_df.columns[0]
+        long_df = long_df.rename(columns={first_column: "date"})
+
+    long_df = pd.melt(long_df, id_vars=["date"], var_name="ticker_pk", value_name="value")
+    long_df = long_df.dropna(subset=["value"])
+    if long_df.empty:
+        return long_df
+
+    long_df["date"] = pd.to_datetime(long_df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    long_df = long_df.dropna(subset=["date"])
     return long_df

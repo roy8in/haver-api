@@ -1,100 +1,266 @@
-import pandas as pd
 from datetime import datetime, timedelta
+
+import pandas as pd
+
+import data_processor as processor
 import db_handler as db
 import haver_provider as haver
+from run_logging import append_summary, log_event, setup_run_logging
 
-def run_sync():
-    # 0. 초기화
-    db.setup_environment()
-    if not haver.initialize():
-        print("❌ Haver provider initialization failed. Aborting.")
-        return
 
-    # 1. 티커 리스트 로드
-    try:
-        tickers_csv = pd.read_csv('tickers.csv')
-        ticker_list = tickers_csv['ticker'].tolist()
-    except Exception as e:
-        print(f"❌ Failed to load tickers.csv: {e}")
-        return
+def _standardize_mod(val):
+    """Normalize Haver metadata timestamps before comparing."""
+    if val is None:
+        return ""
 
-    # 2. 메타데이터 동기화
-    print(f"🔄 Syncing metadata for {len(ticker_list)} tickers...")
-    meta_df = haver.fetch_metadata(ticker_list)
-    if meta_df.empty:
-        print("⚠️ No metadata collected.")
-        return
-    
-    meta_df.columns = [c.lower() for c in meta_df.columns]
-    db.create_table_with_types(meta_df, 'haver_metadata')
-    db.upsert_data(meta_df, 'haver_metadata')
-    print("✅ Metadata synced and uploaded.")
+    s = str(val).replace("T", " ").strip()
+    if s.lower() in {"", "none", "nan", "nat"}:
+        return ""
 
-    # 3. DB 현황 파악 (각 티커별 마지막 수집일)
-    db_max_dates = db.get_ticker_max_dates()
-    
-    # 4. 티커별 수집 작업 생성
-    end_col = next((c for c in ['enddate', 'end', 'finish', 'last'] if c in meta_df.columns), None)
-    start_col = next((c for c in ['startdate', 'start', 'begin'] if c in meta_df.columns), None)
-    
+    if len(s) > 10 and s.startswith("2") and s[4:5] != "-":
+        idx = s.find("20")
+        if idx != -1:
+            s = s[idx:]
+
+    if "." in s:
+        s = s.split(".", 1)[0]
+
+    return s
+
+
+def _parse_metadata_date(value, default_value):
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return pd.Timestamp(default_value)
+    return parsed
+
+
+def _build_sync_tasks(meta_df, db_metadata, db_max_dates):
+    end_col = next((c for c in ["enddate", "end", "finish", "last"] if c in meta_df.columns), None)
+    start_col = next((c for c in ["startdate", "start", "begin"] if c in meta_df.columns), None)
+
     sync_tasks = []
     skipped_up_to_date = 0
-    
+    kept_for_backfill = 0
+
     for _, row in meta_df.iterrows():
-        pk = row['ticker_pk']
-        m_start = pd.to_datetime(row[start_col]) if start_col else pd.to_datetime('1900-01-01')
-        m_end = pd.to_datetime(row[end_col]) if end_col else datetime.now()
-        
-        db_last = pd.to_datetime(db_max_dates.get(pk)) if pk in db_max_dates else None
-        
+        pk = row["ticker_pk"]
+        new_mod = _standardize_mod(row.get("datetimemod", ""))
+        old_mod = _standardize_mod(db_metadata.get(pk, ""))
+
+        m_start = _parse_metadata_date(row[start_col], "1900-01-01") if start_col else pd.Timestamp("1900-01-01")
+        m_end = _parse_metadata_date(row[end_col], datetime.now()) if end_col else pd.Timestamp(datetime.now())
+
+        db_last = None
+        if pk in db_max_dates:
+            parsed_db_last = pd.to_datetime(db_max_dates.get(pk), errors="coerce")
+            if not pd.isna(parsed_db_last):
+                db_last = parsed_db_last
+
         if db_last is None:
-            # 신규 티커: 메타데이터 시작일부터 전체 수집
             fetch_start = m_start
         else:
-            # 기존 티커: 마지막 날짜 180일 전부터 (Revision 대비)
             fetch_start = db_last - timedelta(days=180)
-            if db_last >= m_end:
+            if db_last >= m_end and old_mod == new_mod:
                 skipped_up_to_date += 1
                 continue
+            if old_mod == new_mod and db_last < m_end:
+                kept_for_backfill += 1
 
-        sync_tasks.append({
-            'pk': pk,
-            'freq': row.get('frequency', row.get('freq', 'ALL')),
-            'start': fetch_start
-        })
+        sync_tasks.append(
+            {
+                "pk": pk,
+                "freq": row.get("frequency", row.get("freq", "ALL")),
+                "start": fetch_start,
+            }
+        )
 
-    if skipped_up_to_date > 0:
-        print(f"ℹ️ {skipped_up_to_date} tickers are already up-to-date. Skipping.")
+    return sync_tasks, skipped_up_to_date, kept_for_backfill
 
-    # 5. 수집 실행 (최적화: 주기별로 묶고, 청크 내 최소 시작일 사용)
-    task_df = pd.DataFrame(sync_tasks)
-    if task_df.empty:
-        print("✅ Everything is up-to-date. No data to fetch.")
-        return
 
-    for freq, group in task_df.groupby('freq'):
-        tickers_in_freq = group.to_dict('records')
-        total_count = len(tickers_in_freq)
-        print(f"🔄 Processing {freq} frequency ({total_count} tickers)...")
-        
-        chunk_size = 50
-        for i in range(0, total_count, chunk_size):
-            chunk_tasks = tickers_in_freq[i:i + chunk_size]
-            chunk_tickers = [t['pk'] for t in chunk_tasks]
-            
-            # 이 50개 티커 중 가장 빠른 날짜를 수집 시작일로 결정
-            # (API 호출 횟수 최소화 전략)
-            min_start = min([t['start'] for t in chunk_tasks]).strftime('%Y-%m-%d')
-            
-            print(f"   - Fetching chunk {i//chunk_size + 1}/{(total_count-1)//chunk_size + 1} from {min_start}...")
-            long_df = haver.fetch_series_data(chunk_tickers, min_start)
-            
-            if not long_df.empty:
-                db.create_table_with_types(long_df, 'haver_values')
-                db.upsert_data(long_df, 'haver_values')
-                print(f"     ✅ Uploaded {len(long_df)} rows.")
-            else:
-                print(f"     ⚠️ No data fetched for this chunk.")
+def run_sync():
+    run_context = setup_run_logging()
+    logger = run_context["logger"]
+    summary = {
+        "run_id": run_context["run_id"],
+        "start_time": run_context["run_started_at"].isoformat(timespec="seconds"),
+        "status": "FAILED",
+        "ticker_total": 0,
+        "metadata_rows": 0,
+        "rows_uploaded_metadata": 0,
+        "ticker_skipped": 0,
+        "ticker_backfill": 0,
+        "ticker_fetched": 0,
+        "chunks_total": 0,
+        "chunks_failed": 0,
+        "rows_uploaded_values": 0,
+        "rows_uploaded_di": 0,
+        "error_stage": "",
+        "error_message": "",
+    }
+
+    log_event(
+        logger,
+        "info",
+        "Starting sync run",
+        run_id=summary["run_id"],
+        app_log_path=run_context["app_log_path"],
+        summary_log_path=run_context["summary_log_path"],
+    )
+
+    try:
+        summary["error_stage"] = "environment_setup"
+        db.setup_environment()
+        if not haver.initialize():
+            summary["error_stage"] = "haver_initialize"
+            summary["error_message"] = "Haver provider initialization failed."
+            log_event(logger, "error", summary["error_message"])
+            return False
+
+        summary["error_stage"] = "ticker_load"
+        tickers_csv = pd.read_csv("tickers.csv")
+        ticker_list = tickers_csv["ticker"].tolist()
+        summary["ticker_total"] = len(ticker_list)
+        log_event(logger, "info", "Loaded tickers.csv", ticker_total=summary["ticker_total"])
+
+        summary["error_stage"] = "db_state_load"
+        db_metadata = db.get_stored_metadata()
+        db_max_dates = db.get_ticker_max_dates()
+
+        summary["error_stage"] = "metadata_fetch"
+        meta_df = haver.fetch_metadata(ticker_list)
+        if meta_df.empty:
+            summary["error_message"] = "No metadata collected."
+            log_event(logger, "warning", summary["error_message"])
+            return False
+
+        meta_df.columns = [c.lower() for c in meta_df.columns]
+        summary["metadata_rows"] = len(meta_df)
+        db.create_table_with_types(meta_df, "haver_metadata")
+        summary["rows_uploaded_metadata"] = db.upsert_data(meta_df, "haver_metadata")
+        log_event(
+            logger,
+            "info",
+            "Metadata sync complete",
+            metadata_rows=summary["metadata_rows"],
+            rows_uploaded_metadata=summary["rows_uploaded_metadata"],
+        )
+
+        summary["error_stage"] = "task_build"
+        sync_tasks, skipped_up_to_date, kept_for_backfill = _build_sync_tasks(meta_df, db_metadata, db_max_dates)
+        summary["ticker_skipped"] = skipped_up_to_date
+        summary["ticker_backfill"] = kept_for_backfill
+        summary["ticker_fetched"] = len(sync_tasks)
+        log_event(
+            logger,
+            "info",
+            "Built sync tasks",
+            ticker_skipped=skipped_up_to_date,
+            ticker_backfill=kept_for_backfill,
+            ticker_fetched=len(sync_tasks),
+        )
+
+        task_df = pd.DataFrame(sync_tasks)
+        if task_df.empty:
+            summary["status"] = "SUCCESS"
+            summary["error_stage"] = ""
+            log_event(logger, "info", "Everything is up-to-date. No data to fetch.")
+            return True
+
+        summary["error_stage"] = "series_fetch"
+        task_df = task_df.sort_values("start")
+
+        for freq, group in task_df.groupby("freq"):
+            tickers_in_freq = group.to_dict("records")
+            total_count = len(tickers_in_freq)
+            log_event(logger, "info", "Processing frequency group", frequency=freq, ticker_count=total_count)
+
+            chunk_size = 50
+            for i in range(0, total_count, chunk_size):
+                chunk_tasks = tickers_in_freq[i:i + chunk_size]
+                chunk_tickers = [t["pk"] for t in chunk_tasks]
+                min_start = min(t["start"] for t in chunk_tasks).strftime("%Y-%m-%d")
+                summary["chunks_total"] += 1
+
+                log_event(
+                    logger,
+                    "info",
+                    "Fetching chunk",
+                    frequency=freq,
+                    chunk_index=i // chunk_size + 1,
+                    chunk_size=len(chunk_tickers),
+                    min_start=min_start,
+                )
+                long_df = haver.fetch_series_data(chunk_tickers, min_start)
+
+                if long_df.empty:
+                    summary["chunks_failed"] += 1
+                    log_event(
+                        logger,
+                        "warning",
+                        "No data fetched for chunk",
+                        frequency=freq,
+                        chunk_index=i // chunk_size + 1,
+                    )
+                    continue
+
+                db.create_table_with_types(long_df, "haver_values")
+                uploaded = db.upsert_data(long_df, "haver_values")
+                summary["rows_uploaded_values"] += uploaded
+                if uploaded == 0:
+                    summary["chunks_failed"] += 1
+                    log_event(
+                        logger,
+                        "error",
+                        "Chunk upload failed",
+                        frequency=freq,
+                        chunk_index=i // chunk_size + 1,
+                    )
+                else:
+                    log_event(
+                        logger,
+                        "info",
+                        "Chunk upload complete",
+                        frequency=freq,
+                        chunk_index=i // chunk_size + 1,
+                        rows_uploaded=uploaded,
+                    )
+
+        summary["error_stage"] = "processing"
+        processing_stats = processor.run_processing()
+        summary["rows_uploaded_di"] = processing_stats.get("rows_uploaded_di", 0)
+        log_event(logger, "info", "Derived processing complete", rows_uploaded_di=summary["rows_uploaded_di"])
+
+        summary["status"] = "SUCCESS"
+        summary["error_stage"] = ""
+        return True
+    except Exception as exc:
+        summary["error_message"] = str(exc)
+        log_event(
+            logger,
+            "exception",
+            "Sync run failed with unhandled exception",
+            error_stage=summary["error_stage"] or "unknown",
+            error=str(exc),
+        )
+        return False
+    finally:
+        finished_at = datetime.now()
+        summary["end_time"] = finished_at.isoformat(timespec="seconds")
+        summary["duration_sec"] = round((finished_at - run_context["run_started_at"]).total_seconds(), 2)
+        append_summary(run_context["summary_log_path"], summary)
+        log_event(
+            logger,
+            "info",
+            "Finished sync run",
+            run_id=summary["run_id"],
+            status=summary["status"],
+            duration_sec=summary["duration_sec"],
+            rows_uploaded_values=summary["rows_uploaded_values"],
+            rows_uploaded_di=summary["rows_uploaded_di"],
+            chunks_failed=summary["chunks_failed"],
+        )
+
 
 if __name__ == "__main__":
     run_sync()
