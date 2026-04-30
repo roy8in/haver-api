@@ -3,6 +3,7 @@ import importlib
 import sys
 import types
 import unittest
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -93,6 +94,22 @@ class HaverProviderTests(unittest.TestCase):
         result = haver_provider._process_haver_data(raw, ["ticker_a"])
         self.assertTrue(result.empty)
 
+    def test_summarize_error_report_counts_codelists(self):
+        report = {
+            "databasepath": "remote (DLX Direct)",
+            "codelists": {
+                "databaseaccess": ["usecon:gdp", "g10:n111rtar"],
+                "codesnotfound": [],
+            },
+        }
+
+        summary = haver_provider._summarize_error_report(report)
+
+        self.assertEqual(summary["databaseaccess_count"], 2)
+        self.assertEqual(summary["databaseaccess_sample"], "usecon:gdp, g10:n111rtar")
+        self.assertEqual(summary["codesnotfound_count"], 0)
+        self.assertEqual(summary["databasepath"], "remote (DLX Direct)")
+
 
 class DataProcessorTests(unittest.TestCase):
     def test_fetch_raw_data_handles_duplicate_rows(self):
@@ -137,6 +154,17 @@ class LoggingTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["run_id"], "run-1")
         self.assertEqual(rows[0]["status"], "SUCCESS")
+
+    def test_call_with_timeout_times_out_for_slow_callable(self):
+        def slow_call():
+            time.sleep(0.2)
+            return True
+
+        result, timed_out, error = main._call_with_timeout(slow_call, 0.05, "slow_call")
+
+        self.assertIsNone(result)
+        self.assertTrue(timed_out)
+        self.assertIsNone(error)
 
 
 if __name__ == "__main__":

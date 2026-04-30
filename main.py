@@ -1,3 +1,7 @@
+import os
+import sys
+import threading
+from pathlib import Path
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -6,6 +10,9 @@ import data_processor as processor
 import db_handler as db
 import haver_provider as haver
 from run_logging import append_summary, log_event, setup_run_logging
+
+
+BASE_DIR = Path(__file__).resolve().parent
 
 
 def _standardize_mod(val):
@@ -33,6 +40,27 @@ def _parse_metadata_date(value, default_value):
     if pd.isna(parsed):
         return pd.Timestamp(default_value)
     return parsed
+
+
+def _call_with_timeout(func, timeout_seconds, label):
+    """Run a callable in a daemon thread and return (result, timed_out)."""
+    outcome = {"result": None, "error": None}
+
+    def runner():
+        try:
+            outcome["result"] = func()
+        except Exception as exc:  # pragma: no cover - defensive wrapper
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=runner, name=label, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+
+    if thread.is_alive():
+        return None, True, None
+    if outcome["error"] is not None:
+        return None, False, outcome["error"]
+    return outcome["result"], False, None
 
 
 def _build_sync_tasks(meta_df, db_metadata, db_max_dates):
@@ -81,6 +109,7 @@ def _build_sync_tasks(meta_df, db_metadata, db_max_dates):
 def run_sync():
     run_context = setup_run_logging()
     logger = run_context["logger"]
+    init_timeout = int(os.getenv("HAVER_INIT_TIMEOUT_SECONDS", "30"))
     summary = {
         "run_id": run_context["run_id"],
         "start_time": run_context["run_started_at"].isoformat(timespec="seconds"),
@@ -106,19 +135,40 @@ def run_sync():
         run_id=summary["run_id"],
         app_log_path=run_context["app_log_path"],
         summary_log_path=run_context["summary_log_path"],
+        cwd=os.getcwd(),
+        script_dir=BASE_DIR,
+        python_executable=sys.executable,
+        haver_init_timeout_sec=init_timeout,
     )
 
     try:
         summary["error_stage"] = "environment_setup"
         db.setup_environment()
-        if not haver.initialize():
+        log_event(logger, "info", "Starting Haver initialization", timeout_sec=init_timeout)
+        haver_initialized, timed_out, init_error = _call_with_timeout(
+            haver.initialize,
+            init_timeout,
+            "haver_initialize",
+        )
+        if timed_out:
             summary["error_stage"] = "haver_initialize"
-            summary["error_message"] = "Haver provider initialization failed."
+            summary["error_message"] = f"Haver initialization timed out after {init_timeout} seconds."
             log_event(logger, "error", summary["error_message"])
             return False
+        if init_error is not None:
+            summary["error_stage"] = "haver_initialize"
+            summary["error_message"] = str(init_error)
+            log_event(logger, "error", "Haver initialization raised an exception", error=str(init_error))
+            return False
+        if not haver_initialized:
+            summary["error_stage"] = "haver_initialize"
+            summary["error_message"] = "Haver provider initialization returned False."
+            log_event(logger, "error", summary["error_message"])
+            return False
+        log_event(logger, "info", "Haver initialization complete")
 
         summary["error_stage"] = "ticker_load"
-        tickers_csv = pd.read_csv("tickers.csv")
+        tickers_csv = pd.read_csv(BASE_DIR / "tickers.csv")
         ticker_list = tickers_csv["ticker"].tolist()
         summary["ticker_total"] = len(ticker_list)
         log_event(logger, "info", "Loaded tickers.csv", ticker_total=summary["ticker_total"])
@@ -138,6 +188,11 @@ def run_sync():
         summary["metadata_rows"] = len(meta_df)
         db.create_table_with_types(meta_df, "haver_metadata")
         summary["rows_uploaded_metadata"] = db.upsert_data(meta_df, "haver_metadata")
+        if summary["rows_uploaded_metadata"] == 0:
+            summary["error_stage"] = "metadata_upload"
+            summary["error_message"] = "Metadata upload failed; DB API accepted 0 rows."
+            log_event(logger, "error", summary["error_message"])
+            return False
         log_event(
             logger,
             "info",
@@ -230,6 +285,12 @@ def run_sync():
         processing_stats = processor.run_processing()
         summary["rows_uploaded_di"] = processing_stats.get("rows_uploaded_di", 0)
         log_event(logger, "info", "Derived processing complete", rows_uploaded_di=summary["rows_uploaded_di"])
+
+        if summary["chunks_failed"]:
+            summary["error_stage"] = "series_upload"
+            summary["error_message"] = f"{summary['chunks_failed']} chunk(s) failed to fetch or upload."
+            log_event(logger, "error", summary["error_message"])
+            return False
 
         summary["status"] = "SUCCESS"
         summary["error_stage"] = ""

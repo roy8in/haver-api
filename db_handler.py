@@ -30,12 +30,27 @@ if not VERIFY_SSL:
 
 def setup_environment():
     """Apply certificate bundle settings for outbound requests."""
+    log_event(
+        logger,
+        "info",
+        "Configured DB transport settings",
+        verify_ssl=VERIFY_SSL,
+        cert_path=CERT_PATH or "",
+        cert_path_exists=bool(CERT_PATH and os.path.exists(CERT_PATH)),
+    )
     if CERT_PATH and os.path.exists(CERT_PATH):
         os.environ["REQUESTS_CA_BUNDLE"] = CERT_PATH
         log_event(logger, "info", "Configured certificate bundle", cert_path=CERT_PATH)
     else:
         os.environ.pop("REQUESTS_CA_BUNDLE", None)
-        log_event(logger, "info", "No certificate bundle configured")
+        if VERIFY_SSL:
+            log_event(
+                logger,
+                "warning",
+                "No certificate bundle configured while SSL verification is enabled",
+            )
+        else:
+            log_event(logger, "warning", "SSL verification disabled for DB requests")
 
 
 def _request_verify_value():

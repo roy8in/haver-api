@@ -2,7 +2,9 @@
 .env
 __pycache__/
 *.pyc
-.gitignore
+logs/
 tickers.csv
 *.csv
 *.xlsx
+invalid_tickers.txt
+test_summary_output.csv

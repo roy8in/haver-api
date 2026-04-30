@@ -45,7 +45,12 @@ pip install Haver --extra-index-url http://www.haver.com/Python --trusted-host w
 POSTGRE_API_URL=your_api_url
 POSTGRE_API_KEY=your_api_key
 CERT_PATH_ENV=your_cert_path (필요시)
+POSTGRE_VERIFY_SSL=true
+HAVER_INIT_TIMEOUT_SECONDS=30
 ```
+
+- `POSTGRE_VERIFY_SSL=false`로 두면 인증서 검증 없이 DB API를 호출합니다. 현재처럼 사내/중간 인증서 문제로 SSL 검증이 실패할 때의 임시 우회용입니다.
+- `CERT_PATH_ENV`에 CA 번들 경로를 넣을 수 있으면 그쪽이 더 안전합니다.
 
 ### 3. 티커 리스트 작성
 `tickers.csv` 파일에 수집할 티커를 입력합니다 (예: `usecon:gdp`).

@@ -1,3 +1,6 @@
+import os
+import warnings
+
 import pandas as pd
 import Haver
 
@@ -7,11 +10,39 @@ from run_logging import get_logger, log_event
 logger = get_logger("haver")
 
 
+def _summarize_error_report(report):
+    codelists = report.get("codelists", {}) if isinstance(report, dict) else {}
+    summary = {}
+    for key, value in codelists.items():
+        if isinstance(value, list):
+            summary[f"{key}_count"] = len(value)
+            if value:
+                summary[f"{key}_sample"] = ", ".join(str(item) for item in value[:10])
+    if "databasepath" in report:
+        summary["databasepath"] = report.get("databasepath")
+    return summary
+
+
+def _metadata_request(ticker_list, log_error=True):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        meta_df = Haver.metadata(ticker_list)
+    if isinstance(meta_df, pd.DataFrame):
+        return meta_df
+    if log_error and isinstance(meta_df, dict):
+        log_event(logger, "warning", "Metadata fetch returned Haver error report", **_summarize_error_report(meta_df))
+    return pd.DataFrame()
+
+
 def initialize():
     """Initialize the Haver client."""
     try:
+        haver_path = os.getenv("HAVER_PATH", "").strip()
+        if haver_path:
+            Haver.path(haver_path)
+            log_event(logger, "info", "Configured Haver database path", haver_path=haver_path)
         Haver.direct(1)
-        log_event(logger, "info", "Initialized Haver client")
+        log_event(logger, "info", "Initialized Haver client", direct=Haver.direct(), haver_path=haver_path)
         return True
     except Exception as e:
         log_event(logger, "error", "Haver initialization error", error=str(e))
@@ -22,10 +53,36 @@ def fetch_metadata(ticker_list):
     """Fetch metadata for the requested ticker list."""
     log_event(logger, "info", "Fetching metadata", ticker_count=len(ticker_list))
     try:
-        meta_df = Haver.metadata(ticker_list)
-        if isinstance(meta_df, dict):
-            log_event(logger, "error", "Metadata fetch returned error payload")
-            return pd.DataFrame()
+        meta_df = _metadata_request(ticker_list)
+        if meta_df.empty:
+            log_event(logger, "warning", "Metadata fetch failed; forcing DLX Direct reconnect and retrying")
+            try:
+                Haver.direct("force")
+            except Exception as exc:
+                log_event(logger, "warning", "DLX Direct force reconnect failed", error=str(exc))
+            meta_df = _metadata_request(ticker_list)
+
+        if meta_df.empty and len(ticker_list) > 1:
+            log_event(logger, "warning", "Metadata batch failed; retrying per ticker", ticker_count=len(ticker_list))
+            recovered = []
+            failed = []
+            for ticker in ticker_list:
+                single_df = _metadata_request([ticker], log_error=False)
+                if single_df.empty:
+                    failed.append(ticker)
+                else:
+                    recovered.append(single_df)
+            if failed:
+                log_event(
+                    logger,
+                    "warning",
+                    "Metadata per-ticker retry had failures",
+                    failed_count=len(failed),
+                    failed_sample=", ".join(str(ticker) for ticker in failed[:20]),
+                )
+            if recovered:
+                meta_df = pd.concat(recovered, ignore_index=True)
+
         if not isinstance(meta_df, pd.DataFrame) or meta_df.empty:
             log_event(logger, "warning", "Metadata fetch returned no rows")
             return pd.DataFrame()
