@@ -54,10 +54,51 @@
       },
       "additionalProperties": true
     },
+    "timings": {
+      "type": "object",
+      "properties": {
+        "total_sec": {},
+        "stages": { "type": "object" },
+        "slowest_stage": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "failure": {
+      "type": "object",
+      "properties": {
+        "category": { "type": "string" },
+        "stage": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "retry": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "max_attempts": { "type": "integer" },
+        "attempts_used": { "type": "integer" },
+        "timeout_sec": {},
+        "delay_sec": {}
+      },
+      "additionalProperties": true
+    },
+    "db": {
+      "type": "object",
+      "properties": {
+        "stored_metadata_count": {},
+        "stored_value_ticker_count": {},
+        "metadata_table_present": { "type": "boolean" },
+        "values_table_present": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
     "publish": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean" }
+        "enabled": { "type": "boolean" },
+        "status": { "type": "string" },
+        "message": { "type": "string" }
       },
       "additionalProperties": true
     },

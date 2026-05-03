@@ -30,7 +30,15 @@ The home dashboard can consume those files directly from GitHub:
 - `metrics.rows_uploaded_values`
 - `metrics.rows_uploaded_di`
 - `metrics.chunks_failed`
+- `timings.stages`
+- `timings.slowest_stage`
+- `failure.category`
+- `retry.attempts_used`
+- `db.stored_metadata_count`
+- `db.stored_value_ticker_count`
 - `publish.enabled`
+- `publish.status`
+- `publish.message`
 - `files.latest_failure_json`
 - `files.failure_events_jsonl`
 

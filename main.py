@@ -86,6 +86,35 @@ def _get_bool_env(name, default=False):
     return raw_value in {"1", "true", "yes", "on"}
 
 
+def _record_stage_timing(summary, stage_name, started_at):
+    elapsed = round(time.perf_counter() - started_at, 3)
+    summary.setdefault("stage_timings_sec", {})[stage_name] = elapsed
+    return time.perf_counter()
+
+
+def _classify_failure(error_stage, error_message, login_required=False):
+    message = (error_message or "").lower()
+    stage = (error_stage or "").lower()
+
+    if login_required or stage == "haver_preflight" or "authentication failed" in message:
+        return "login_required"
+    if stage == "haver_initialize" and "timed out" in message:
+        return "timeout"
+    if stage in {"metadata_upload", "series_upload"}:
+        return "db_upload_failed"
+    if stage == "metadata_fetch" and "no metadata collected" in message:
+        return "metadata_empty"
+    if stage == "metadata_fetch":
+        return "metadata_fetch_failed"
+    if stage == "series_fetch":
+        return "series_fetch_failed"
+    if stage == "processing":
+        return "processing_failed"
+    if stage == "environment_setup":
+        return "environment_setup_failed"
+    return "unexpected_exception"
+
+
 def _initialize_haver_with_retry(logger, timeout_seconds, max_attempts, retry_delay_seconds):
     last_error_message = ""
 
@@ -203,7 +232,21 @@ def run_sync():
         "rows_uploaded_di": 0,
         "error_stage": "",
         "error_message": "",
+        "failure_category": "",
+        "stage_timings_sec": {},
+        "slowest_stage": "",
+        "haver_init_attempts": init_attempts,
+        "haver_init_attempts_used": 0,
+        "haver_init_timeout_sec": init_timeout,
+        "haver_init_retry_delay_sec": init_retry_delay,
+        "stored_metadata_count": 0,
+        "stored_value_ticker_count": 0,
+        "metadata_table_present": False,
+        "values_table_present": False,
+        "publish_status": "",
+        "publish_message": "",
     }
+    run_started_perf = time.perf_counter()
 
     log_event(
         logger,
@@ -223,14 +266,19 @@ def run_sync():
 
     try:
         summary["error_stage"] = "environment_setup"
+        stage_started = time.perf_counter()
         db.setup_environment()
+        stage_started = _record_stage_timing(summary, "environment_setup", stage_started)
 
+        stage_started = time.perf_counter()
         login_status = haver.log_login_status(level="warning" if not require_auth_ready else "info")
+        stage_started = _record_stage_timing(summary, "login_preflight", stage_started)
         if login_status["login_required"]:
             message = "Haver session is not authenticated. A login prompt may appear during initialization."
             if require_auth_ready:
                 summary["error_stage"] = "haver_preflight"
                 summary["error_message"] = message
+                summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], True)
                 alert_transports = _alert_haver_login_issue(
                     logger,
                     "Haver login is required before scheduled execution.",
@@ -249,15 +297,19 @@ def run_sync():
                 note=login_status["note"],
             )
 
+        stage_started = time.perf_counter()
         haver_initialized, init_attempt, init_error_message = _initialize_haver_with_retry(
             logger,
             init_timeout,
             init_attempts,
             init_retry_delay,
         )
+        summary["haver_init_attempts_used"] = init_attempt
+        stage_started = _record_stage_timing(summary, "haver_initialize", stage_started)
         if not haver_initialized:
             summary["error_stage"] = "haver_initialize"
             summary["error_message"] = init_error_message or "Haver initialization failed."
+            summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], login_status.get("login_required") if login_status else False)
             if login_status["login_required"] or "Authentication failed" in summary["error_message"]:
                 alert_transports = _alert_haver_login_issue(
                     logger,
@@ -279,29 +331,43 @@ def run_sync():
         log_event(logger, "info", "Haver initialization complete", attempts=init_attempt)
 
         summary["error_stage"] = "ticker_load"
+        stage_started = time.perf_counter()
         tickers_csv = pd.read_csv(BASE_DIR / "tickers.csv")
         ticker_list = tickers_csv["ticker"].tolist()
         summary["ticker_total"] = len(ticker_list)
+        stage_started = _record_stage_timing(summary, "ticker_load", stage_started)
         log_event(logger, "info", "Loaded tickers.csv", ticker_total=summary["ticker_total"])
 
         summary["error_stage"] = "db_state_load"
+        stage_started = time.perf_counter()
         db_metadata = db.get_stored_metadata()
         db_max_dates = db.get_ticker_max_dates()
+        summary["stored_metadata_count"] = len(db_metadata)
+        summary["stored_value_ticker_count"] = len(db_max_dates)
+        summary["metadata_table_present"] = bool(db_metadata)
+        summary["values_table_present"] = bool(db_max_dates)
+        stage_started = _record_stage_timing(summary, "db_state_load", stage_started)
 
         summary["error_stage"] = "metadata_fetch"
+        stage_started = time.perf_counter()
         meta_df = haver.fetch_metadata(ticker_list)
+        stage_started = _record_stage_timing(summary, "metadata_fetch", stage_started)
         if meta_df.empty:
             summary["error_message"] = "No metadata collected."
+            summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], False)
             log_event(logger, "warning", summary["error_message"])
             return False
 
         meta_df.columns = [c.lower() for c in meta_df.columns]
         summary["metadata_rows"] = len(meta_df)
+        stage_started = time.perf_counter()
         db.create_table_with_types(meta_df, "haver_metadata")
         summary["rows_uploaded_metadata"] = db.upsert_data(meta_df, "haver_metadata")
+        stage_started = _record_stage_timing(summary, "metadata_upload", stage_started)
         if summary["rows_uploaded_metadata"] == 0:
             summary["error_stage"] = "metadata_upload"
             summary["error_message"] = "Metadata upload failed; DB API accepted 0 rows."
+            summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], False)
             log_event(logger, "error", summary["error_message"])
             return False
         log_event(
@@ -313,7 +379,9 @@ def run_sync():
         )
 
         summary["error_stage"] = "task_build"
+        stage_started = time.perf_counter()
         sync_tasks, skipped_up_to_date, kept_for_backfill = _build_sync_tasks(meta_df, db_metadata, db_max_dates)
+        stage_started = _record_stage_timing(summary, "task_build", stage_started)
         summary["ticker_skipped"] = skipped_up_to_date
         summary["ticker_backfill"] = kept_for_backfill
         summary["ticker_fetched"] = len(sync_tasks)
@@ -334,6 +402,7 @@ def run_sync():
             return True
 
         summary["error_stage"] = "series_fetch"
+        stage_started = time.perf_counter()
         task_df = task_df.sort_values("start")
 
         for freq, group in task_df.groupby("freq"):
@@ -391,15 +460,19 @@ def run_sync():
                         chunk_index=i // chunk_size + 1,
                         rows_uploaded=uploaded,
                     )
+        stage_started = _record_stage_timing(summary, "series_fetch", stage_started)
 
         summary["error_stage"] = "processing"
+        stage_started = time.perf_counter()
         processing_stats = processor.run_processing()
+        stage_started = _record_stage_timing(summary, "processing", stage_started)
         summary["rows_uploaded_di"] = processing_stats.get("rows_uploaded_di", 0)
         log_event(logger, "info", "Derived processing complete", rows_uploaded_di=summary["rows_uploaded_di"])
 
         if summary["chunks_failed"]:
             summary["error_stage"] = "series_upload"
             summary["error_message"] = f"{summary['chunks_failed']} chunk(s) failed to fetch or upload."
+            summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], False)
             log_event(logger, "error", summary["error_message"])
             return False
 
@@ -408,6 +481,7 @@ def run_sync():
         return True
     except Exception as exc:
         summary["error_message"] = str(exc)
+        summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], login_status.get("login_required") if login_status else False)
         log_event(
             logger,
             "exception",
@@ -420,6 +494,13 @@ def run_sync():
         finished_at = datetime.now()
         summary["end_time"] = finished_at.isoformat(timespec="seconds")
         summary["duration_sec"] = round((finished_at - run_context["run_started_at"]).total_seconds(), 2)
+        summary["stage_timings_sec"]["total"] = round(time.perf_counter() - run_started_perf, 3)
+        if summary["stage_timings_sec"]:
+            slowest_stage = max(summary["stage_timings_sec"], key=summary["stage_timings_sec"].get)
+            summary["slowest_stage"] = f"{slowest_stage}:{summary['stage_timings_sec'][slowest_stage]}"
+        if not summary["failure_category"] and summary["status"] != "SUCCESS":
+            summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], login_status.get("login_required") if login_status else False)
+        summary["publish_status"] = "enabled" if publish_enabled else "disabled"
         append_summary(run_context["summary_log_path"], summary)
         status_record = dashboard_state.build_run_record(
             summary,
@@ -431,6 +512,8 @@ def run_sync():
         try:
             dashboard_state.write_status(status_record)
             publish_result = dashboard_state.publish_status(logger)
+            summary["publish_status"] = "pushed" if publish_result.get("pushed") else ("enabled" if publish_result.get("enabled") else "disabled")
+            summary["publish_message"] = publish_result.get("message", "")
             if publish_result.get("enabled") and not publish_result.get("pushed"):
                 log_event(
                     logger,

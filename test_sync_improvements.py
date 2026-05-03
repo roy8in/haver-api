@@ -281,6 +281,10 @@ class DashboardStateTests(unittest.TestCase):
                 self.assertEqual(payload["run_id"], "run-1")
                 self.assertEqual(payload["publish"]["enabled"], True)
                 self.assertEqual(payload["metrics"]["rows_uploaded_metadata"], 8)
+                self.assertIn("stages", payload["timings"])
+                self.assertEqual(payload["failure"]["category"], "")
+                self.assertEqual(payload["retry"]["max_attempts"], 1)
+                self.assertEqual(payload["db"]["stored_metadata_count"], 0)
 
                 with events_path.open("r", encoding="utf-8") as handle:
                     lines = handle.readlines()
@@ -335,6 +339,7 @@ class DashboardStateTests(unittest.TestCase):
 
                 self.assertEqual(payload["run_id"], "run-fail")
                 self.assertEqual(payload["error_stage"], "haver_initialize")
+                self.assertEqual(payload["failure"]["category"], "login_required")
 
                 with failure_events_path.open("r", encoding="utf-8") as handle:
                     lines = handle.readlines()

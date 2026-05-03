@@ -40,6 +40,57 @@ def _compact_summary(summary):
     return {key: _safe_record_value(value) for key, value in summary.items()}
 
 
+def _failure_category(error_stage, error_message, login_required=False):
+    message = (error_message or "").lower()
+    stage = (error_stage or "").lower()
+
+    if login_required or stage == "haver_preflight" or "authentication failed" in message:
+        return "login_required"
+    if stage == "haver_initialize" and "timed out" in message:
+        return "timeout"
+    if stage in {"metadata_upload", "series_upload"}:
+        return "db_upload_failed"
+    if stage == "metadata_fetch" and "no metadata collected" in message:
+        return "metadata_empty"
+    if stage == "metadata_fetch":
+        return "metadata_fetch_failed"
+    if stage == "series_fetch":
+        return "series_fetch_failed"
+    if stage == "processing":
+        return "processing_failed"
+    if stage == "environment_setup":
+        return "environment_setup_failed"
+    return "unexpected_exception"
+
+
+def _build_retry(summary):
+    return {
+        "enabled": bool(summary.get("haver_init_attempts", 1) > 1),
+        "max_attempts": summary.get("haver_init_attempts", 1),
+        "attempts_used": summary.get("haver_init_attempts_used", 1),
+        "timeout_sec": summary.get("haver_init_timeout_sec", ""),
+        "delay_sec": summary.get("haver_init_retry_delay_sec", ""),
+    }
+
+
+def _build_timings(summary):
+    timings = summary.get("stage_timings_sec", {})
+    return {
+        "total_sec": summary.get("duration_sec", ""),
+        "stages": timings,
+        "slowest_stage": summary.get("slowest_stage", ""),
+    }
+
+
+def _build_db(summary):
+    return {
+        "stored_metadata_count": summary.get("stored_metadata_count", 0),
+        "stored_value_ticker_count": summary.get("stored_value_ticker_count", 0),
+        "metadata_table_present": summary.get("metadata_table_present", False),
+        "values_table_present": summary.get("values_table_present", False),
+    }
+
+
 def _build_files(run_context):
     return {
         "app_log": str(run_context.get("app_log_path", "")),
@@ -111,8 +162,21 @@ def build_run_record(summary, run_context, login_status=None, alert_transports=N
         extra=_compact_summary(summary),
     )
     record["metrics"] = metrics
+    record["timings"] = _build_timings(summary)
+    record["retry"] = _build_retry(summary)
+    record["db"] = _build_db(summary)
+    record["failure"] = {
+        "category": "" if summary.get("status") == "SUCCESS" else summary.get(
+            "failure_category",
+            _failure_category(summary.get("error_stage"), summary.get("error_message"), login_status.get("login_required") if login_status else False),
+        ),
+        "stage": summary.get("error_stage", ""),
+        "message": summary.get("error_message", ""),
+    }
     record["publish"] = {
         "enabled": publish_enabled,
+        "status": summary.get("publish_status", ""),
+        "message": summary.get("publish_message", ""),
     }
     record["health"] = "ok" if summary.get("status") == "SUCCESS" and summary.get("chunks_failed", 0) == 0 else "issue"
     return record
@@ -134,6 +198,16 @@ def build_preflight_record(run_context, login_status, status, message, alert_tra
             },
         },
     )
+    record["failure"] = {
+        "category": "login_required" if login_status.get("login_required") else ("unknown" if status != "READY" else ""),
+        "stage": "haver_preflight" if status != "READY" else "",
+        "message": message if status != "READY" else "",
+    }
+    record["timings"] = {
+        "total_sec": "",
+        "stages": {},
+        "slowest_stage": "",
+    }
     record["health"] = "ok" if status == "READY" else "issue"
     return record
 
@@ -157,6 +231,11 @@ def write_status(record):
         "error_message": record.get("error_message", ""),
         "haver": record.get("haver", {}),
         "metrics": record.get("metrics", {}),
+        "timings": record.get("timings", {}),
+        "failure": record.get("failure", {}),
+        "retry": record.get("retry", {}),
+        "db": record.get("db", {}),
+        "publish": record.get("publish", {}),
     }
     with EVENTS_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, ensure_ascii=False, default=_json_default) + "\n")
@@ -176,8 +255,13 @@ def write_status(record):
             "error_message": record.get("error_message", ""),
             "haver": record.get("haver", {}),
             "metrics": record.get("metrics", {}),
+            "timings": record.get("timings", {}),
+            "failure": record.get("failure", {}),
+            "retry": record.get("retry", {}),
+            "db": record.get("db", {}),
             "alerts": record.get("alerts", {}),
             "files": record.get("files", {}),
+            "publish": record.get("publish", {}),
         }
         with LATEST_FAILURE_PATH.open("w", encoding="utf-8") as handle:
             json.dump(failure_record, handle, ensure_ascii=False, indent=2, default=_json_default)
