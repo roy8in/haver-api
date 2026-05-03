@@ -11,7 +11,7 @@ from app.run_logging import get_logger, log_event
 
 logger = get_logger("db")
 
-env_path = Path(__file__).resolve().parent / ".env"
+env_path = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(env_path)
 
 POSTGRE_API_URL = os.getenv("POSTGRE_API_URL")

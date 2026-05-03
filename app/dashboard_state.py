@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parents[1]
 STATE_DIR = BASE_DIR / "state"
 LATEST_STATUS_PATH = STATE_DIR / "haver_status.json"
 EVENTS_PATH = STATE_DIR / "haver_events.jsonl"

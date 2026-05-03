@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parents[1]
 LOG_DIR = BASE_DIR / "logs"
 LOGGER_NAME = "haver_api"
 SUMMARY_HEADERS = [
