@@ -6,7 +6,7 @@ import requests
 import urllib3
 from dotenv import load_dotenv
 
-from run_logging import get_logger, log_event
+from app.run_logging import get_logger, log_event
 
 
 logger = get_logger("db")

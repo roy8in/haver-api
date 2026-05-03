@@ -1,6 +1,6 @@
 import pandas as pd
 import Haver
-import haver_provider as haver
+from app import haver_provider as haver
 import os
 
 def validate_tickers_internal(ticker_list):

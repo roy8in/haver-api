@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/roy8in/haver-api/docs/haver-status.schema.json",
+  "title": "Haver Dashboard Status",
+  "type": "object",
+  "required": ["schema_version", "project", "record_type", "source", "run_id", "status", "generated_at", "haver", "files"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "project": { "type": "string" },
+    "record_type": { "type": "string", "enum": ["run", "preflight"] },
+    "source": { "type": "string" },
+    "node_role": { "type": "string" },
+    "generated_at": { "type": "string" },
+    "user": { "type": "string" },
+    "status": { "type": "string" },
+    "run_id": { "type": "string" },
+    "start_time": { "type": ["string", "null"] },
+    "end_time": { "type": ["string", "null"] },
+    "duration_sec": { "type": ["number", "integer", "string", "null"] },
+    "error_stage": { "type": ["string", "null"] },
+    "error_message": { "type": ["string", "null"] },
+    "haver": {
+      "type": "object",
+      "properties": {
+        "authenticated": { "type": ["boolean", "null"] },
+        "direct_state": { "type": ["boolean", "string", "null"] },
+        "login_required": { "type": ["boolean", "null"] },
+        "ready": { "type": ["boolean", "null"] },
+        "note": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "alerts": {
+      "type": "object",
+      "properties": {
+        "transports": { "type": "array", "items": { "type": "string" } },
+        "enabled": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "ticker_total": { "type": "integer" },
+        "metadata_rows": { "type": "integer" },
+        "rows_uploaded_metadata": { "type": "integer" },
+        "ticker_skipped": { "type": "integer" },
+        "ticker_backfill": { "type": "integer" },
+        "ticker_fetched": { "type": "integer" },
+        "chunks_total": { "type": "integer" },
+        "chunks_failed": { "type": "integer" },
+        "rows_uploaded_values": { "type": "integer" },
+        "rows_uploaded_di": { "type": "integer" }
+      },
+      "additionalProperties": true
+    },
+    "publish": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "files": {
+      "type": "object",
+      "properties": {
+        "app_log": { "type": "string" },
+        "summary_log": { "type": "string" },
+        "status_json": { "type": "string" },
+        "events_jsonl": { "type": "string" },
+        "latest_failure_json": { "type": "string" },
+        "failure_events_jsonl": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "health": { "type": "string", "enum": ["ok", "issue"] }
+  },
+  "additionalProperties": true
+}

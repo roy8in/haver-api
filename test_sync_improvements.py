@@ -1,5 +1,7 @@
 import csv
 import importlib
+import json
+import shutil
 import sys
 import types
 import unittest
@@ -20,10 +22,11 @@ if "Haver" not in sys.modules:
 
 
 main = importlib.import_module("main")
-db_handler = importlib.import_module("db_handler")
-haver_provider = importlib.import_module("haver_provider")
-data_processor = importlib.import_module("data_processor")
-run_logging = importlib.import_module("run_logging")
+dashboard_state = importlib.import_module("app.dashboard_state")
+db_handler = importlib.import_module("app.db_handler")
+haver_provider = importlib.import_module("app.haver_provider")
+data_processor = importlib.import_module("app.data_processor")
+run_logging = importlib.import_module("app.run_logging")
 
 
 class SyncTaskTests(unittest.TestCase):
@@ -110,6 +113,36 @@ class HaverProviderTests(unittest.TestCase):
         self.assertEqual(summary["codesnotfound_count"], 0)
         self.assertEqual(summary["databasepath"], "remote (DLX Direct)")
 
+    def test_get_login_status_marks_unauthenticated_session_as_login_required(self):
+        original_haver = haver_provider.Haver
+        original_haveraux = haver_provider.Haveraux
+        try:
+            haver_provider.Haver = types.SimpleNamespace(direct=lambda *_args, **_kwargs: False)
+            haver_provider.Haveraux = types.SimpleNamespace(authenticated_=False)
+
+            status = haver_provider.get_login_status()
+        finally:
+            haver_provider.Haver = original_haver
+            haver_provider.Haveraux = original_haveraux
+
+        self.assertTrue(status["login_required"])
+        self.assertFalse(status["ready"])
+        self.assertEqual(status["authenticated"], False)
+
+    def test_preflight_login_blocks_when_authentication_is_missing(self):
+        with patch.object(haver_provider, "get_login_status", return_value={
+            "direct_state": False,
+            "authenticated": False,
+            "login_required": True,
+            "ready": False,
+            "note": "Haver session is not authenticated yet.",
+        }), patch.object(haver_provider, "log_event") as log_event:
+            allowed, status = haver_provider.preflight_login()
+
+        self.assertFalse(allowed)
+        self.assertTrue(status["login_required"])
+        self.assertTrue(log_event.called)
+
 
 class DataProcessorTests(unittest.TestCase):
     def test_fetch_raw_data_handles_duplicate_rows(self):
@@ -165,6 +198,153 @@ class LoggingTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertTrue(timed_out)
         self.assertIsNone(error)
+
+    def test_initialize_haver_with_retry_retries_after_timeout(self):
+        outcomes = iter(
+            [
+                (None, True, None),
+                (True, False, None),
+            ]
+        )
+
+        def fake_call_with_timeout(*_args, **_kwargs):
+            return next(outcomes)
+
+        with patch.object(main, "_call_with_timeout", side_effect=fake_call_with_timeout), patch.object(main.time, "sleep") as sleep:
+            result, attempts, error_message = main._initialize_haver_with_retry(
+                run_logging.get_logger("test"),
+                30,
+                2,
+                1,
+            )
+
+        self.assertTrue(result)
+        self.assertEqual(attempts, 2)
+        self.assertEqual(error_message, "")
+        sleep.assert_called_once_with(1)
+
+    def test_alert_haver_login_issue_calls_send_alert(self):
+        with patch.object(main, "send_alert", return_value=["popup"]) as send_alert:
+            transports = main._alert_haver_login_issue(
+                run_logging.get_logger("test"),
+                "Login is required",
+                run_id="run-1",
+                authenticated=False,
+            )
+
+        self.assertEqual(transports, ["popup"])
+        send_alert.assert_called_once()
+
+
+class DashboardStateTests(unittest.TestCase):
+    def test_write_status_creates_latest_and_events_files(self):
+        summary = {
+            "run_id": "run-1",
+            "start_time": "2026-05-04T06:00:00",
+            "status": "SUCCESS",
+            "ticker_total": 10,
+            "metadata_rows": 8,
+            "rows_uploaded_metadata": 8,
+            "ticker_skipped": 2,
+            "ticker_backfill": 1,
+            "ticker_fetched": 7,
+            "chunks_total": 1,
+            "chunks_failed": 0,
+            "rows_uploaded_values": 100,
+            "rows_uploaded_di": 12,
+            "error_stage": "",
+            "error_message": "",
+        }
+        run_context = {
+            "run_id": "run-1",
+            "run_started_at": pd.Timestamp("2026-05-04T06:00:00"),
+            "app_log_path": Path("logs/app_test.log"),
+            "summary_log_path": Path("logs/summary_test.csv"),
+        }
+
+        tmp_path = Path("test_dashboard_state_tmp")
+        try:
+            tmp_path.mkdir(exist_ok=True)
+            with patch.object(dashboard_state, "STATE_DIR", tmp_path), patch.object(dashboard_state, "LATEST_STATUS_PATH", tmp_path / "haver_status.json"), patch.object(dashboard_state, "EVENTS_PATH", tmp_path / "haver_events.jsonl"):
+                record = dashboard_state.build_run_record(summary, run_context, login_status={"authenticated": True, "direct_state": True, "login_required": False, "ready": True, "note": "ready"}, alert_transports=["popup"], publish_enabled=True)
+                dashboard_state.write_status(record)
+
+                latest_path = tmp_path / "haver_status.json"
+                events_path = tmp_path / "haver_events.jsonl"
+
+                self.assertTrue(latest_path.exists())
+                self.assertTrue(events_path.exists())
+
+                with latest_path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+
+                self.assertEqual(payload["run_id"], "run-1")
+                self.assertEqual(payload["publish"]["enabled"], True)
+                self.assertEqual(payload["metrics"]["rows_uploaded_metadata"], 8)
+
+                with events_path.open("r", encoding="utf-8") as handle:
+                    lines = handle.readlines()
+
+                self.assertEqual(len(lines), 1)
+                event = json.loads(lines[0])
+                self.assertEqual(event["run_id"], "run-1")
+        finally:
+            if tmp_path.exists():
+                shutil.rmtree(tmp_path)
+
+    def test_write_status_records_failures_separately(self):
+        summary = {
+            "run_id": "run-fail",
+            "start_time": "2026-05-04T06:10:00",
+            "status": "FAILED",
+            "ticker_total": 0,
+            "metadata_rows": 0,
+            "rows_uploaded_metadata": 0,
+            "ticker_skipped": 0,
+            "ticker_backfill": 0,
+            "ticker_fetched": 0,
+            "chunks_total": 0,
+            "chunks_failed": 0,
+            "rows_uploaded_values": 0,
+            "rows_uploaded_di": 0,
+            "error_stage": "haver_initialize",
+            "error_message": "Haver login required.",
+        }
+        run_context = {
+            "run_id": "run-fail",
+            "run_started_at": pd.Timestamp("2026-05-04T06:10:00"),
+            "app_log_path": Path("logs/app_test.log"),
+            "summary_log_path": Path("logs/summary_test.csv"),
+        }
+
+        tmp_path = Path("test_dashboard_state_tmp")
+        try:
+            tmp_path.mkdir(exist_ok=True)
+            with patch.object(dashboard_state, "STATE_DIR", tmp_path), patch.object(dashboard_state, "LATEST_STATUS_PATH", tmp_path / "haver_status.json"), patch.object(dashboard_state, "EVENTS_PATH", tmp_path / "haver_events.jsonl"), patch.object(dashboard_state, "LATEST_FAILURE_PATH", tmp_path / "haver_latest_failure.json"), patch.object(dashboard_state, "FAILURES_PATH", tmp_path / "haver_failures.jsonl"):
+                record = dashboard_state.build_run_record(summary, run_context, login_status={"authenticated": False, "direct_state": False, "login_required": True, "ready": False, "note": "not ready"}, alert_transports=["popup"], publish_enabled=False)
+                dashboard_state.write_status(record)
+
+                failure_path = tmp_path / "haver_latest_failure.json"
+                failure_events_path = tmp_path / "haver_failures.jsonl"
+
+                self.assertTrue(failure_path.exists())
+                self.assertTrue(failure_events_path.exists())
+
+                with failure_path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+
+                self.assertEqual(payload["run_id"], "run-fail")
+                self.assertEqual(payload["error_stage"], "haver_initialize")
+
+                with failure_events_path.open("r", encoding="utf-8") as handle:
+                    lines = handle.readlines()
+
+                self.assertEqual(len(lines), 1)
+                failure_event = json.loads(lines[0])
+                self.assertEqual(failure_event["status"], "FAILED")
+        finally:
+            if tmp_path.exists():
+                shutil.rmtree(tmp_path)
 
 
 if __name__ == "__main__":

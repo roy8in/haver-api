@@ -1,9 +1,9 @@
 import pandas as pd
 
-import db_handler as db
-from processors.policy_rate import process_policy_rate
-from processors.pmi import process_pmi
-from run_logging import get_logger, log_event
+from app import db_handler as db
+from app.processors.policy_rate import process_policy_rate
+from app.processors.pmi import process_pmi
+from app.run_logging import get_logger, log_event
 
 
 logger = get_logger("processor")

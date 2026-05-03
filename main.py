@@ -1,15 +1,18 @@
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from datetime import datetime, timedelta
 
 import pandas as pd
 
-import data_processor as processor
-import db_handler as db
-import haver_provider as haver
-from run_logging import append_summary, log_event, setup_run_logging
+from app.alerts import send_alert
+from app import dashboard_state
+from app import data_processor as processor
+from app import db_handler as db
+from app import haver_provider as haver
+from app.run_logging import append_summary, log_event, setup_run_logging
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -63,6 +66,73 @@ def _call_with_timeout(func, timeout_seconds, label):
     return outcome["result"], False, None
 
 
+def _get_int_env(name, default, minimum=1):
+    raw_value = os.getenv(name, "")
+    if raw_value == "":
+        return default
+
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return default
+
+    return max(minimum, parsed)
+
+
+def _get_bool_env(name, default=False):
+    raw_value = os.getenv(name, "").strip().lower()
+    if raw_value == "":
+        return default
+    return raw_value in {"1", "true", "yes", "on"}
+
+
+def _initialize_haver_with_retry(logger, timeout_seconds, max_attempts, retry_delay_seconds):
+    last_error_message = ""
+
+    for attempt in range(1, max_attempts + 1):
+        log_event(
+            logger,
+            "info",
+            "Starting Haver initialization attempt",
+            attempt=attempt,
+            max_attempts=max_attempts,
+            timeout_sec=timeout_seconds,
+            retry_delay_sec=retry_delay_seconds if attempt < max_attempts else 0,
+        )
+        haver_initialized, timed_out, init_error = _call_with_timeout(
+            haver.initialize,
+            timeout_seconds,
+            f"haver_initialize_attempt_{attempt}",
+        )
+
+        if timed_out:
+            last_error_message = f"Haver initialization timed out after {timeout_seconds} seconds on attempt {attempt}."
+        elif init_error is not None:
+            last_error_message = str(init_error)
+        elif not haver_initialized:
+            last_error_message = "Haver provider initialization returned False."
+        else:
+            return True, attempt, ""
+
+        log_event(
+            logger,
+            "warning",
+            "Haver initialization attempt failed",
+            attempt=attempt,
+            max_attempts=max_attempts,
+            error_message=last_error_message,
+        )
+
+        if attempt < max_attempts:
+            time.sleep(retry_delay_seconds)
+
+    return False, max_attempts, last_error_message
+
+
+def _alert_haver_login_issue(logger, message, **context):
+    return send_alert(logger, "Haver login required", message, **context)
+
+
 def _build_sync_tasks(meta_df, db_metadata, db_max_dates):
     end_col = next((c for c in ["enddate", "end", "finish", "last"] if c in meta_df.columns), None)
     start_col = next((c for c in ["startdate", "start", "begin"] if c in meta_df.columns), None)
@@ -110,6 +180,13 @@ def run_sync():
     run_context = setup_run_logging()
     logger = run_context["logger"]
     init_timeout = int(os.getenv("HAVER_INIT_TIMEOUT_SECONDS", "30"))
+    init_attempts = _get_int_env("HAVER_INIT_MAX_ATTEMPTS", 2)
+    init_retry_delay = _get_int_env("HAVER_INIT_RETRY_DELAY_SECONDS", 5, minimum=0)
+    require_auth_ready = _get_bool_env("HAVER_REQUIRE_AUTH_READY", False)
+    login_status = None
+    alert_transports = []
+    publish_enabled = _get_bool_env("HAVER_GITHUB_PUBLISH_ENABLED", False)
+    publish_result = {"enabled": publish_enabled, "committed": False, "pushed": False, "message": "Publishing disabled."}
     summary = {
         "run_id": run_context["run_id"],
         "start_time": run_context["run_started_at"].isoformat(timespec="seconds"),
@@ -139,33 +216,67 @@ def run_sync():
         script_dir=BASE_DIR,
         python_executable=sys.executable,
         haver_init_timeout_sec=init_timeout,
+        haver_init_attempts=init_attempts,
+        haver_init_retry_delay_sec=init_retry_delay,
+        haver_require_auth_ready=require_auth_ready,
     )
 
     try:
         summary["error_stage"] = "environment_setup"
         db.setup_environment()
-        log_event(logger, "info", "Starting Haver initialization", timeout_sec=init_timeout)
-        haver_initialized, timed_out, init_error = _call_with_timeout(
-            haver.initialize,
+
+        login_status = haver.log_login_status(level="warning" if not require_auth_ready else "info")
+        if login_status["login_required"]:
+            message = "Haver session is not authenticated. A login prompt may appear during initialization."
+            if require_auth_ready:
+                summary["error_stage"] = "haver_preflight"
+                summary["error_message"] = message
+                alert_transports = _alert_haver_login_issue(
+                    logger,
+                    "Haver login is required before scheduled execution.",
+                    run_id=summary["run_id"],
+                    direct_state=login_status["direct_state"],
+                    authenticated=login_status["authenticated"],
+                    note=login_status["note"],
+                )
+                return False
+            log_event(
+                logger,
+                "warning",
+                message,
+                direct_state=login_status["direct_state"],
+                authenticated=login_status["authenticated"],
+                note=login_status["note"],
+            )
+
+        haver_initialized, init_attempt, init_error_message = _initialize_haver_with_retry(
+            logger,
             init_timeout,
-            "haver_initialize",
+            init_attempts,
+            init_retry_delay,
         )
-        if timed_out:
-            summary["error_stage"] = "haver_initialize"
-            summary["error_message"] = f"Haver initialization timed out after {init_timeout} seconds."
-            log_event(logger, "error", summary["error_message"])
-            return False
-        if init_error is not None:
-            summary["error_stage"] = "haver_initialize"
-            summary["error_message"] = str(init_error)
-            log_event(logger, "error", "Haver initialization raised an exception", error=str(init_error))
-            return False
         if not haver_initialized:
             summary["error_stage"] = "haver_initialize"
-            summary["error_message"] = "Haver provider initialization returned False."
-            log_event(logger, "error", summary["error_message"])
+            summary["error_message"] = init_error_message or "Haver initialization failed."
+            if login_status["login_required"] or "Authentication failed" in summary["error_message"]:
+                alert_transports = _alert_haver_login_issue(
+                    logger,
+                    "Haver login appears to be required and initialization did not complete.",
+                    run_id=summary["run_id"],
+                    error_message=summary["error_message"],
+                    direct_state=login_status["direct_state"],
+                    authenticated=login_status["authenticated"],
+                    note=login_status["note"],
+                )
+            log_event(
+                logger,
+                "error",
+                "Haver initialization failed after retries",
+                attempts=init_attempt,
+                error_message=summary["error_message"],
+            )
             return False
-        log_event(logger, "info", "Haver initialization complete")
+        log_event(logger, "info", "Haver initialization complete", attempts=init_attempt)
 
         summary["error_stage"] = "ticker_load"
         tickers_csv = pd.read_csv(BASE_DIR / "tickers.csv")
@@ -310,6 +421,25 @@ def run_sync():
         summary["end_time"] = finished_at.isoformat(timespec="seconds")
         summary["duration_sec"] = round((finished_at - run_context["run_started_at"]).total_seconds(), 2)
         append_summary(run_context["summary_log_path"], summary)
+        status_record = dashboard_state.build_run_record(
+            summary,
+            run_context,
+            login_status=login_status,
+            alert_transports=alert_transports,
+            publish_enabled=publish_enabled,
+        )
+        try:
+            dashboard_state.write_status(status_record)
+            publish_result = dashboard_state.publish_status(logger)
+            if publish_result.get("enabled") and not publish_result.get("pushed"):
+                log_event(
+                    logger,
+                    "warning",
+                    "Dashboard state publish not completed",
+                    publish_message=publish_result.get("message", ""),
+                )
+        except Exception as exc:
+            log_event(logger, "warning", "Dashboard state write/publish failed", error=str(exc))
         log_event(
             logger,
             "info",

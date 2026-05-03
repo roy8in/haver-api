@@ -4,7 +4,12 @@ import warnings
 import pandas as pd
 import Haver
 
-from run_logging import get_logger, log_event
+try:
+    import Haver._Haveraux as Haveraux
+except Exception:  # pragma: no cover - fallback for test stubs
+    Haveraux = None
+
+from app.run_logging import get_logger, log_event
 
 
 logger = get_logger("haver")
@@ -23,6 +28,62 @@ def _summarize_error_report(report):
     return summary
 
 
+def _safe_direct_state():
+    try:
+        return Haver.direct()
+    except Exception as exc:
+        return f"error: {exc}"
+
+
+def get_login_status():
+    """Return a best-effort snapshot of the current Haver login state."""
+    direct_state = _safe_direct_state()
+    authenticated = getattr(Haveraux, "authenticated_", None) if Haveraux is not None else None
+
+    if authenticated is True:
+        login_required = False
+        ready = True
+    elif authenticated is False:
+        login_required = True
+        ready = False
+    else:
+        login_required = False
+        ready = direct_state is True
+
+    if authenticated is False:
+        note = "Haver session is not authenticated yet."
+    elif authenticated is True:
+        note = "Haver session is authenticated."
+    else:
+        note = "Haver authentication state is unavailable."
+
+    return {
+        "direct_state": direct_state,
+        "authenticated": authenticated,
+        "login_required": login_required,
+        "ready": ready,
+        "note": note,
+    }
+
+
+def log_login_status(status=None, level="info"):
+    """Log the current Haver login status in a consistent format."""
+    if status is None:
+        status = get_login_status()
+
+    log_event(
+        logger,
+        level,
+        "Haver login status snapshot",
+        direct_state=status["direct_state"],
+        authenticated=status["authenticated"],
+        login_required=status["login_required"],
+        ready=status["ready"],
+        note=status["note"],
+    )
+    return status
+
+
 def _metadata_request(ticker_list, log_error=True):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -38,15 +99,65 @@ def initialize():
     """Initialize the Haver client."""
     try:
         haver_path = os.getenv("HAVER_PATH", "").strip()
+        direct_before = _safe_direct_state()
         if haver_path:
             Haver.path(haver_path)
-            log_event(logger, "info", "Configured Haver database path", haver_path=haver_path)
+            log_event(
+                logger,
+                "info",
+                "Configured Haver database path",
+                haver_path=haver_path,
+                direct_before=direct_before,
+            )
         Haver.direct(1)
-        log_event(logger, "info", "Initialized Haver client", direct=Haver.direct(), haver_path=haver_path)
+        log_event(
+            logger,
+            "info",
+            "Initialized Haver client",
+            direct_before=direct_before,
+            direct_after=_safe_direct_state(),
+            haver_path=haver_path,
+        )
         return True
     except Exception as e:
-        log_event(logger, "error", "Haver initialization error", error=str(e))
+        log_event(logger, "error", "Haver initialization error", error=str(e), direct_state=_safe_direct_state())
         return False
+
+
+def preflight_login():
+    """Check whether Haver login is ready without triggering the login prompt."""
+    status = get_login_status()
+    if status["login_required"]:
+        log_event(
+            logger,
+            "error",
+            "Haver login is required before scheduled execution",
+            direct_state=status["direct_state"],
+            authenticated=status["authenticated"],
+            note=status["note"],
+        )
+        return False, status
+
+    if not status["ready"]:
+        log_event(
+            logger,
+            "warning",
+            "Unable to confirm Haver login readiness",
+            direct_state=status["direct_state"],
+            authenticated=status["authenticated"],
+            note=status["note"],
+        )
+        return False, status
+
+    log_event(
+        logger,
+        "info",
+        "Haver login preflight passed",
+        direct_state=status["direct_state"],
+        authenticated=status["authenticated"],
+        note=status["note"],
+    )
+    return True, status
 
 
 def fetch_metadata(ticker_list):
@@ -60,6 +171,8 @@ def fetch_metadata(ticker_list):
                 Haver.direct("force")
             except Exception as exc:
                 log_event(logger, "warning", "DLX Direct force reconnect failed", error=str(exc))
+            else:
+                log_event(logger, "info", "DLX Direct force reconnect issued", direct_state=_safe_direct_state())
             meta_df = _metadata_request(ticker_list)
 
         if meta_df.empty and len(ticker_list) > 1:
