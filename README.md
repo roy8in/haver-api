@@ -13,16 +13,13 @@
 
 ## 프로젝트 구조
 - `main.py`: 전체 수집 및 가공 프로세스를 제어하는 메인 실행 파일.
-- `app/`: 실행 로직과 공용 유틸리티 패키지.
-  - `data_processor.py`: 지표별 프로세서를 호출하여 가공 데이터를 생성하는 오케스트레이터.
-  - `processors/`: 개별 지표 처리 로직 모듈.
-    - `policy_rate.py`: 기준금리 변화분 및 DI 계산.
-    - `pmi.py`: 제조업/서비스업 PMI DI 및 3MA 계산.
-  - `haver_provider.py`: Haver API 통신 및 데이터 전처리 전담.
-  - `db_handler.py`: 데이터베이스 API 통신 및 SQL 실행 전담.
-  - `dashboard_state.py`: 대시보드용 상태 JSON 생성 및 게시.
-  - `alerts.py`: 팝업 및 이메일 알림 전송.
-  - `run_logging.py`: 실행 로그와 요약 CSV 기록.
+- `data_processor.py`: 지표별 프로세서를 호출하여 가공 데이터를 생성하는 오케스트레이터.
+- `processors/`: 개별 지표 처리 로직 모듈.
+- `haver_provider.py`: Haver API 통신 및 데이터 전처리 전담.
+- `db_handler.py`: 데이터베이스 API 통신 및 SQL 실행 전담.
+- `dashboard_state.py`: 대시보드용 상태 JSON 생성 및 게시.
+- `alerts.py`: 팝업 및 이메일 알림 전송.
+- `run_logging.py`: 실행 로그와 요약 CSV 기록.
 - `tickers.csv`: 수집 대상 티커 목록 설정 파일.
 - `.env`: API 키 및 URL 설정 파일.
 - `state/`: GitHub로 게시되는 최신 상태 및 실패 기록.

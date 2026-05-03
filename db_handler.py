@@ -6,12 +6,12 @@ import requests
 import urllib3
 from dotenv import load_dotenv
 
-from app.run_logging import get_logger, log_event
+from run_logging import get_logger, log_event
 
 
 logger = get_logger("db")
 
-env_path = Path(__file__).resolve().parents[1] / ".env"
+env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(env_path)
 
 POSTGRE_API_URL = os.getenv("POSTGRE_API_URL")

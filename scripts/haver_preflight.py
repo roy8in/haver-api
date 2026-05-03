@@ -7,10 +7,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-from app.alerts import send_alert
-from app import dashboard_state
-from app import haver_provider as haver
-from app.run_logging import setup_run_logging
+from alerts import send_alert
+import dashboard_state
+import haver_provider as haver
+from run_logging import setup_run_logging
 
 
 def main():

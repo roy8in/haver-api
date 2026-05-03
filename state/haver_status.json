@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "project": "haver-api",
+  "record_type": "preflight",
+  "source": "scripts/haver_preflight.py",
+  "node_role": "company",
+  "generated_at": "2026-05-04T07:50:50",
+  "user": "infomax",
+  "status": "BLOCKED",
+  "run_id": "20260504_075050_83e87691",
+  "start_time": "2026-05-04T07:50:50",
+  "end_time": "",
+  "duration_sec": "",
+  "error_stage": "",
+  "error_message": "Haver login is required before the scheduled sync starts.",
+  "haver": {
+    "authenticated": false,
+    "direct_state": false,
+    "login_required": true,
+    "ready": false,
+    "note": "Haver session is not authenticated yet."
+  },
+  "alerts": {
+    "transports": [],
+    "enabled": false
+  },
+  "files": {
+    "app_log": "D:\\haver_api\\logs\\app_2026-05-04.log",
+    "summary_log": "D:\\haver_api\\logs\\summary_2026-05.csv",
+    "status_json": "D:\\haver_api\\state\\haver_status.json",
+    "events_jsonl": "D:\\haver_api\\state\\haver_events.jsonl",
+    "latest_failure_json": "D:\\haver_api\\state\\haver_latest_failure.json",
+    "failure_events_jsonl": "D:\\haver_api\\state\\haver_failures.jsonl"
+  },
+  "preflight": {
+    "login_required": true,
+    "ready": false
+  },
+  "failure": {
+    "category": "login_required",
+    "stage": "haver_preflight",
+    "message": "Haver login is required before the scheduled sync starts."
+  },
+  "timings": {
+    "total_sec": "",
+    "stages": {},
+    "slowest_stage": ""
+  },
+  "health": "issue"
+}

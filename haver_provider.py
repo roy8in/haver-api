@@ -9,7 +9,7 @@ try:
 except Exception:  # pragma: no cover - fallback for test stubs
     Haveraux = None
 
-from app.run_logging import get_logger, log_event
+from run_logging import get_logger, log_event
 
 
 logger = get_logger("haver")

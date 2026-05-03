@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+BASE_DIR = Path(__file__).resolve().parent
 STATE_DIR = BASE_DIR / "state"
 LATEST_STATUS_PATH = STATE_DIR / "haver_status.json"
 EVENTS_PATH = STATE_DIR / "haver_events.jsonl"
@@ -336,7 +336,7 @@ def publish_status(logger, paths=None):
         stdout = (exc.stdout or "").strip()
         message = stderr or stdout or str(exc)
         if logger is not None:
-            from app.run_logging import log_event
+            from run_logging import log_event
 
             log_event(logger, "warning", "Dashboard state publish failed", error=message)
         return {"enabled": True, "committed": False, "pushed": False, "message": message}

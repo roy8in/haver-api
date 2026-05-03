@@ -4,7 +4,7 @@ import smtplib
 import sys
 from email.message import EmailMessage
 
-from app.run_logging import log_event
+from run_logging import log_event
 
 
 def _env_bool(name, default=False):

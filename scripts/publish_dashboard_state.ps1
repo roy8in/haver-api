@@ -6,6 +6,8 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $paths = @(
     "state\haver_status.json",
     "state\haver_events.jsonl",
+    "state\haver_latest_failure.json",
+    "state\haver_failures.jsonl",
     "state\README.md",
     "docs\haver-status.schema.json",
     "docs\dashboard-data-contract.md"

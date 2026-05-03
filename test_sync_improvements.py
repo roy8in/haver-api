@@ -22,11 +22,11 @@ if "Haver" not in sys.modules:
 
 
 main = importlib.import_module("main")
-dashboard_state = importlib.import_module("app.dashboard_state")
-db_handler = importlib.import_module("app.db_handler")
-haver_provider = importlib.import_module("app.haver_provider")
-data_processor = importlib.import_module("app.data_processor")
-run_logging = importlib.import_module("app.run_logging")
+dashboard_state = importlib.import_module("dashboard_state")
+db_handler = importlib.import_module("db_handler")
+haver_provider = importlib.import_module("haver_provider")
+data_processor = importlib.import_module("data_processor")
+run_logging = importlib.import_module("run_logging")
 
 
 class SyncTaskTests(unittest.TestCase):
@@ -234,6 +234,30 @@ class LoggingTests(unittest.TestCase):
 
         self.assertEqual(transports, ["popup"])
         send_alert.assert_called_once()
+
+    def test_metadata_failure_details_marks_login_required_as_haver_login(self):
+        message, stage = main._metadata_failure_details({
+            "login_required": True,
+            "direct_state": False,
+            "authenticated": False,
+            "ready": False,
+            "note": "not ready",
+        })
+
+        self.assertEqual(message, "Haver login is required before metadata can be collected.")
+        self.assertEqual(stage, "haver_login")
+
+    def test_metadata_failure_details_uses_generic_message_when_login_is_ready(self):
+        message, stage = main._metadata_failure_details({
+            "login_required": False,
+            "direct_state": True,
+            "authenticated": True,
+            "ready": True,
+            "note": "ready",
+        })
+
+        self.assertEqual(message, "No metadata collected.")
+        self.assertEqual(stage, "metadata_fetch")
 
 
 class DashboardStateTests(unittest.TestCase):
