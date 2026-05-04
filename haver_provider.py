@@ -43,19 +43,15 @@ def get_login_status():
     if authenticated is True:
         login_required = False
         ready = True
-    elif authenticated is False:
-        login_required = True
-        ready = False
+        note = "Haver session is authenticated."
+    elif direct_state is True:
+        login_required = False
+        ready = True
+        note = "Haver session appears ready."
     else:
         login_required = False
-        ready = direct_state is True
-
-    if authenticated is False:
-        note = "Haver session is not authenticated yet."
-    elif authenticated is True:
-        note = "Haver session is authenticated."
-    else:
-        note = "Haver authentication state is unavailable."
+        ready = False
+        note = "Haver login state could not be confirmed yet."
 
     return {
         "direct_state": direct_state,
@@ -127,17 +123,6 @@ def initialize():
 def preflight_login():
     """Check whether Haver login is ready without triggering the login prompt."""
     status = get_login_status()
-    if status["login_required"]:
-        log_event(
-            logger,
-            "error",
-            "Haver login is required before scheduled execution",
-            direct_state=status["direct_state"],
-            authenticated=status["authenticated"],
-            note=status["note"],
-        )
-        return False, status
-
     if not status["ready"]:
         log_event(
             logger,

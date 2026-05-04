@@ -125,22 +125,36 @@ class HaverProviderTests(unittest.TestCase):
             haver_provider.Haver = original_haver
             haver_provider.Haveraux = original_haveraux
 
-        self.assertTrue(status["login_required"])
         self.assertFalse(status["ready"])
+        self.assertFalse(status["login_required"])
         self.assertEqual(status["authenticated"], False)
 
-    def test_preflight_login_blocks_when_authentication_is_missing(self):
+    def test_get_login_status_treats_direct_ready_as_ready(self):
+        original_haver = haver_provider.Haver
+        original_haveraux = haver_provider.Haveraux
+        try:
+            haver_provider.Haver = types.SimpleNamespace(direct=lambda *_args, **_kwargs: True)
+            haver_provider.Haveraux = types.SimpleNamespace(authenticated_=False)
+
+            status = haver_provider.get_login_status()
+        finally:
+            haver_provider.Haver = original_haver
+            haver_provider.Haveraux = original_haveraux
+
+        self.assertTrue(status["ready"])
+        self.assertFalse(status["login_required"])
+
+    def test_preflight_login_warns_when_readiness_is_unknown(self):
         with patch.object(haver_provider, "get_login_status", return_value={
             "direct_state": False,
             "authenticated": False,
-            "login_required": True,
             "ready": False,
-            "note": "Haver session is not authenticated yet.",
+            "login_required": False,
+            "note": "Haver login state could not be confirmed yet.",
         }), patch.object(haver_provider, "log_event") as log_event:
             allowed, status = haver_provider.preflight_login()
 
         self.assertFalse(allowed)
-        self.assertTrue(status["login_required"])
         self.assertTrue(log_event.called)
 
 
@@ -234,30 +248,6 @@ class LoggingTests(unittest.TestCase):
 
         self.assertEqual(transports, ["popup"])
         send_alert.assert_called_once()
-
-    def test_metadata_failure_details_marks_login_required_as_haver_login(self):
-        message, stage = main._metadata_failure_details({
-            "login_required": True,
-            "direct_state": False,
-            "authenticated": False,
-            "ready": False,
-            "note": "not ready",
-        })
-
-        self.assertEqual(message, "Haver login is required before metadata can be collected.")
-        self.assertEqual(stage, "haver_login")
-
-    def test_metadata_failure_details_uses_generic_message_when_login_is_ready(self):
-        message, stage = main._metadata_failure_details({
-            "login_required": False,
-            "direct_state": True,
-            "authenticated": True,
-            "ready": True,
-            "note": "ready",
-        })
-
-        self.assertEqual(message, "No metadata collected.")
-        self.assertEqual(stage, "metadata_fetch")
 
 
 class DashboardStateTests(unittest.TestCase):

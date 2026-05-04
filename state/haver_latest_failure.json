@@ -1,20 +1,20 @@
 {
-  "generated_at": "2026-05-04T07:50:50",
+  "generated_at": "2026-05-04T09:00:33",
   "schema_version": 1,
   "project": "haver-api",
   "record_type": "preflight",
   "source": "scripts/haver_preflight.py",
-  "run_id": "20260504_075050_83e87691",
-  "status": "BLOCKED",
+  "run_id": "20260504_090033_11329105",
+  "status": "UNKNOWN",
   "health": "issue",
   "error_stage": "",
-  "error_message": "Haver login is required before the scheduled sync starts.",
+  "error_message": "Unable to confirm Haver login readiness before the scheduled sync starts.",
   "haver": {
     "authenticated": false,
     "direct_state": false,
-    "login_required": true,
+    "login_required": false,
     "ready": false,
-    "note": "Haver session is not authenticated yet."
+    "note": "Haver login state could not be confirmed yet."
   },
   "metrics": {},
   "timings": {
@@ -23,9 +23,9 @@
     "slowest_stage": ""
   },
   "failure": {
-    "category": "login_required",
+    "category": "unknown",
     "stage": "haver_preflight",
-    "message": "Haver login is required before the scheduled sync starts."
+    "message": "Unable to confirm Haver login readiness before the scheduled sync starts."
   },
   "retry": {},
   "db": {},

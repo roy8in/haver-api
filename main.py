@@ -115,13 +115,6 @@ def _classify_failure(error_stage, error_message, login_required=False):
     return "unexpected_exception"
 
 
-def _metadata_failure_details(login_status):
-    """Return a more specific metadata failure message when login is not ready."""
-    if login_status and login_status.get("login_required"):
-        return "Haver login is required before metadata can be collected.", "haver_login"
-    return "No metadata collected.", "metadata_fetch"
-
-
 def _initialize_haver_with_retry(logger, timeout_seconds, max_attempts, retry_delay_seconds):
     last_error_message = ""
 
@@ -360,21 +353,8 @@ def run_sync():
         meta_df = haver.fetch_metadata(ticker_list)
         stage_started = _record_stage_timing(summary, "metadata_fetch", stage_started)
         if meta_df.empty:
-            summary["error_message"], summary["error_stage"] = _metadata_failure_details(login_status)
-            summary["failure_category"] = _classify_failure(
-                summary["error_stage"],
-                summary["error_message"],
-                login_status.get("login_required") if login_status else False,
-            )
-            if summary["failure_category"] == "login_required":
-                alert_transports = _alert_haver_login_issue(
-                    logger,
-                    summary["error_message"],
-                    run_id=summary["run_id"],
-                    direct_state=login_status["direct_state"] if login_status else None,
-                    authenticated=login_status["authenticated"] if login_status else None,
-                    note=login_status["note"] if login_status else "",
-                )
+            summary["error_message"] = "No metadata collected."
+            summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], False)
             log_event(logger, "warning", summary["error_message"])
             return False
 
