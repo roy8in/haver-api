@@ -66,10 +66,14 @@ HAVER_GITHUB_PUBLISH_ENABLED=false
 HAVER_GITHUB_COMMIT_MESSAGE=Update dashboard state
 HAVER_GITHUB_PUSH_REMOTE=origin
 HAVER_GITHUB_PUSH_BRANCH=
+DLXPAR=full_path_to_dlx_ini_file
+DLXDB=full_path_to_dlx_database_folder
 ```
 
 - `POSTGRE_VERIFY_SSL=false`로 두면 인증서 검증 없이 DB API를 호출합니다. 현재처럼 사내/중간 인증서 문제로 SSL 검증이 실패할 때의 임시 우회용입니다.
 - `CERT_PATH_ENV`에 CA 번들 경로를 넣을 수 있으면 그쪽이 더 안전합니다.
+- `DLXPAR`는 Haver가 DB 경로 INI를 읽을 때 쓰는 DLX 설정 파일 경로입니다.
+- `DLXDB`는 Haver가 자동으로 DB 경로를 잡을 때 참고하는 DLX 데이터 경로입니다.
 - `HAVER_INIT_MAX_ATTEMPTS`와 `HAVER_INIT_RETRY_DELAY_SECONDS`는 Haver 초기화가 느리거나 일시적으로 멈출 때의 재시도 동작을 조절합니다.
 - `HAVER_REQUIRE_AUTH_READY=true`로 두면 예약 실행 전에 Haver 로그인 상태가 없을 때 바로 중단하고 알람을 보냅니다.
 - `HAVER_ALERT_POPUP=true`는 콘솔 실행 중 즉시 팝업 알림을 띄웁니다. SMTP 값을 채우면 이메일 알림도 보낼 수 있습니다.

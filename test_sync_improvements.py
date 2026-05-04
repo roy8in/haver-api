@@ -15,6 +15,7 @@ import pandas as pd
 if "Haver" not in sys.modules:
     haver_stub = types.SimpleNamespace(
         direct=lambda *_args, **_kwargs: None,
+        path=lambda *_args, **_kwargs: "",
         metadata=lambda *_args, **_kwargs: pd.DataFrame(),
         data=lambda *_args, **_kwargs: pd.DataFrame(),
     )
@@ -156,6 +157,47 @@ class HaverProviderTests(unittest.TestCase):
 
         self.assertFalse(allowed)
         self.assertTrue(log_event.called)
+
+    def test_ensure_database_path_uses_haver_path_env(self):
+        original_haver = haver_provider.Haver
+        try:
+            state = {"path": ""}
+
+            def fake_path(arg=None):
+                if arg is None:
+                    return state["path"]
+                state["path"] = arg
+                return state["path"]
+
+            haver_provider.Haver = types.SimpleNamespace(path=fake_path)
+            with patch.dict(haver_provider.os.environ, {"HAVER_PATH": "D:\\data\\haver"}, clear=False):
+                ready, value = haver_provider.ensure_database_path()
+        finally:
+            haver_provider.Haver = original_haver
+
+        self.assertTrue(ready)
+        self.assertEqual(value, "D:\\data\\haver")
+
+    def test_ensure_database_path_falls_back_to_ini_when_dlxpar_exists(self):
+        original_haver = haver_provider.Haver
+        try:
+            state = {"path": ""}
+
+            def fake_path(arg=None):
+                if arg is None:
+                    return state["path"]
+                if arg == "ini":
+                    state["path"] = "D:\\dlx\\database"
+                return state["path"]
+
+            haver_provider.Haver = types.SimpleNamespace(path=fake_path)
+            with patch.dict(haver_provider.os.environ, {"DLXPAR": "D:\\dlx\\dlx.ini"}, clear=False):
+                ready, value = haver_provider.ensure_database_path()
+        finally:
+            haver_provider.Haver = original_haver
+
+        self.assertTrue(ready)
+        self.assertEqual(value, "D:\\dlx\\database")
 
 
 class DataProcessorTests(unittest.TestCase):

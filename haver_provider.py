@@ -35,6 +35,71 @@ def _safe_direct_state():
         return f"error: {exc}"
 
 
+def _safe_haver_path():
+    try:
+        return Haver.path()
+    except Exception as exc:
+        return f"error: {exc}"
+
+
+def ensure_database_path(logger=None):
+    """Try to restore a usable Haver database path when one is not already set."""
+    current_path = _safe_haver_path()
+    if current_path not in ("", None):
+        return True, current_path
+
+    requested_path = os.getenv("HAVER_PATH", "").strip()
+    if requested_path:
+        try:
+            Haver.path(requested_path)
+            current_path = _safe_haver_path()
+            if current_path not in ("", None):
+                if logger is not None:
+                    log_event(logger, "info", "Configured Haver database path from HAVER_PATH", haver_path=current_path)
+                return True, current_path
+        except Exception as exc:
+            if logger is not None:
+                log_event(logger, "warning", "Failed to configure Haver database path from HAVER_PATH", error=str(exc), haver_path=requested_path)
+
+    dlxpar = os.getenv("DLXPAR", "").strip()
+    if dlxpar:
+        try:
+            Haver.path("ini")
+            current_path = _safe_haver_path()
+            if current_path not in ("", None):
+                if logger is not None:
+                    log_event(logger, "info", "Configured Haver database path from DLXPAR", dlxpar_present=True)
+                return True, current_path
+        except Exception as exc:
+            if logger is not None:
+                log_event(logger, "warning", "Failed to configure Haver database path from DLXPAR", error=str(exc), dlxpar_present=True)
+
+    dlxdb = os.getenv("DLXDB", "").strip()
+    if dlxdb:
+        try:
+            Haver.path("auto")
+            current_path = _safe_haver_path()
+            if current_path not in ("", None):
+                if logger is not None:
+                    log_event(logger, "info", "Configured Haver database path from DLXDB", dlxdb_present=True)
+                return True, current_path
+        except Exception as exc:
+            if logger is not None:
+                log_event(logger, "warning", "Failed to configure Haver database path from DLXDB", error=str(exc), dlxdb_present=True)
+
+    if logger is not None:
+        log_event(
+            logger,
+            "warning",
+            "Haver database path is not configured",
+            haver_path_env=bool(requested_path),
+            dlxpar_env=bool(dlxpar),
+            dlxdb_env=bool(dlxdb),
+            current_path=current_path,
+        )
+    return False, current_path
+
+
 def get_login_status():
     """Return a best-effort snapshot of the current Haver login state."""
     direct_state = _safe_direct_state()
@@ -106,6 +171,7 @@ def initialize():
                 direct_before=direct_before,
             )
         Haver.direct(1)
+        ensure_database_path(logger)
         log_event(
             logger,
             "info",
@@ -149,6 +215,9 @@ def fetch_metadata(ticker_list):
     """Fetch metadata for the requested ticker list."""
     log_event(logger, "info", "Fetching metadata", ticker_count=len(ticker_list))
     try:
+        path_ready, path_value = ensure_database_path(logger)
+        if not path_ready:
+            log_event(logger, "warning", "Proceeding with metadata fetch while Haver database path is unresolved", haver_path=path_value)
         meta_df = _metadata_request(ticker_list)
         if meta_df.empty:
             log_event(logger, "warning", "Metadata fetch failed; forcing DLX Direct reconnect and retrying")
