@@ -1,40 +1,42 @@
-import pandas as pd
+"""PMI 원자료에서 50 초과 비율 기반 DI와 3개월 이동평균을 생성합니다."""
+
 import numpy as np
+import pandas as pd
 
 
 def process_pmi(df):
     """
-    PMI DI 및 3개월 이동평균 계산
-    - DI = (값 > 50인 국가 수) / 전체 국가 수
-    - DI_3MA = DI의 3개월 이동평균
+    PMI 확산지수와 3개월 이동평균을 계산합니다.
+
+    DI = 50을 초과한 국가 수 / 전체 유효 국가 수
+    DI_3MA = DI의 3개월 이동평균
     """
     if df.empty:
         return pd.DataFrame()
 
-    # 1. 50 초과 여부 확인
+    # 50 초과 여부를 1과 0으로 변환하되, 원자료 결측치는 제외합니다.
     above50 = (df > 50).astype(float)
-    # 실제 데이터가 없는 경우(NaN)는 0/1 판단에서 제외하기 위해 다시 NaN 처리
     above50[df.isna()] = np.nan
 
-    # 2. Diffusion Index 계산
+    # 국가별 50 초과 비율을 날짜별 확산지수로 사용합니다.
     def calculate_di(row):
         valid_row = row.dropna()
         if valid_row.empty:
             return np.nan
-        return valid_row.mean()  # (True인 수) / (전체 수) 와 동일
+        return valid_row.mean()
 
     di_series = above50.apply(calculate_di, axis=1)
 
-    # 3. 3개월 이동평균 (3-Month Moving Average)
+    # 단기 노이즈를 줄이기 위해 3개월 이동평균을 함께 제공합니다.
     di_3ma = di_series.rolling(window=3).mean()
 
-    # 결과 정리 (Wide-form)
+    # DB 업로드에 맞는 날짜 컬럼 중심의 테이블로 정리합니다.
     res_df = pd.DataFrame({
-        'date': di_series.index,
-        'di': di_series.values,
-        'di_3ma': di_3ma.values
+        "date": di_series.index,
+        "di": di_series.values,
+        "di_3ma": di_3ma.values,
     })
-    res_df['date'] = res_df['date'].dt.strftime('%Y-%m-%d')
-    res_df = res_df.dropna(subset=['di'])
+    res_df["date"] = res_df["date"].dt.strftime("%Y-%m-%d")
+    res_df = res_df.dropna(subset=["di"])
 
     return res_df

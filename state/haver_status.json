@@ -1,18 +1,18 @@
 {
   "schema_version": 1,
   "project": "haver-api",
-  "record_type": "preflight",
-  "source": "scripts/haver_preflight.py",
+  "record_type": "run",
+  "source": "main.py",
   "node_role": "company",
-  "generated_at": "2026-05-04T09:00:33",
+  "generated_at": "2026-05-22T10:37:10",
   "user": "infomax",
-  "status": "UNKNOWN",
-  "run_id": "20260504_090033_11329105",
-  "start_time": "2026-05-04T09:00:33",
-  "end_time": "",
-  "duration_sec": "",
+  "status": "SUCCESS",
+  "run_id": "20260522_102353_5547de72",
+  "start_time": "2026-05-22T10:23:53",
+  "end_time": "2026-05-22T10:37:10",
+  "duration_sec": 796.29,
   "error_stage": "",
-  "error_message": "Unable to confirm Haver login readiness before the scheduled sync starts.",
+  "error_message": "",
   "haver": {
     "authenticated": false,
     "direct_state": false,
@@ -25,26 +25,109 @@
     "enabled": false
   },
   "files": {
-    "app_log": "D:\\haver_api\\logs\\app_2026-05-04.log",
+    "app_log": "D:\\haver_api\\logs\\app_2026-05-22.log",
     "summary_log": "D:\\haver_api\\logs\\summary_2026-05.csv",
     "status_json": "D:\\haver_api\\state\\haver_status.json",
     "events_jsonl": "D:\\haver_api\\state\\haver_events.jsonl",
     "latest_failure_json": "D:\\haver_api\\state\\haver_latest_failure.json",
     "failure_events_jsonl": "D:\\haver_api\\state\\haver_failures.jsonl"
   },
-  "preflight": {
-    "login_required": false,
-    "ready": false
+  "ticker_total": 515,
+  "metadata_rows": 513,
+  "rows_uploaded_metadata": 513,
+  "ticker_skipped": 0,
+  "ticker_backfill": 0,
+  "ticker_fetched": 513,
+  "chunks_total": 12,
+  "chunks_failed": 0,
+  "rows_uploaded_values": 277319,
+  "rows_uploaded_di": 116080,
+  "failure_category": "",
+  "stage_timings_sec": {
+    "daily_run_guard": 0.01,
+    "environment_setup": 0.0,
+    "login_preflight": 0.0,
+    "haver_initialize": 4.294,
+    "ticker_load": 0.003,
+    "db_state_load": 5.491,
+    "metadata_fetch": 3.647,
+    "metadata_upload": 3.04,
+    "ticker_cleanup": 7.293,
+    "task_build": 0.061,
+    "series_fetch": 485.69,
+    "processing": 233.686,
+    "total": 796.287
   },
-  "failure": {
-    "category": "unknown",
-    "stage": "haver_preflight",
-    "message": "Unable to confirm Haver login readiness before the scheduled sync starts."
+  "slowest_stage": "total:796.287",
+  "haver_init_attempts": 2,
+  "haver_init_attempts_used": 1,
+  "haver_init_timeout_sec": 30,
+  "haver_init_retry_delay_sec": 5,
+  "stored_metadata_count": 513,
+  "stored_value_ticker_count": 513,
+  "metadata_table_present": true,
+  "values_table_present": true,
+  "publish_status": "disabled",
+  "publish_message": "",
+  "excel_export_status": "written",
+  "excel_export_path": "state\\haver_series_export.xlsx",
+  "allow_multiple_daily_runs": false,
+  "full_refresh": true,
+  "ticker_invalid": 0,
+  "ticker_cleanup_count": 513,
+  "metrics": {
+    "ticker_total": 515,
+    "metadata_rows": 513,
+    "rows_uploaded_metadata": 513,
+    "ticker_skipped": 0,
+    "ticker_backfill": 0,
+    "ticker_fetched": 513,
+    "chunks_total": 12,
+    "chunks_failed": 0,
+    "rows_uploaded_values": 277319,
+    "rows_uploaded_di": 116080
   },
   "timings": {
-    "total_sec": "",
-    "stages": {},
-    "slowest_stage": ""
+    "total_sec": 796.29,
+    "stages": {
+      "daily_run_guard": 0.01,
+      "environment_setup": 0.0,
+      "login_preflight": 0.0,
+      "haver_initialize": 4.294,
+      "ticker_load": 0.003,
+      "db_state_load": 5.491,
+      "metadata_fetch": 3.647,
+      "metadata_upload": 3.04,
+      "ticker_cleanup": 7.293,
+      "task_build": 0.061,
+      "series_fetch": 485.69,
+      "processing": 233.686,
+      "total": 796.287
+    },
+    "slowest_stage": "total:796.287"
   },
-  "health": "issue"
+  "retry": {
+    "enabled": true,
+    "max_attempts": 2,
+    "attempts_used": 1,
+    "timeout_sec": 30,
+    "delay_sec": 5
+  },
+  "db": {
+    "stored_metadata_count": 513,
+    "stored_value_ticker_count": 513,
+    "metadata_table_present": true,
+    "values_table_present": true
+  },
+  "failure": {
+    "category": "",
+    "stage": "",
+    "message": ""
+  },
+  "publish": {
+    "enabled": false,
+    "status": "disabled",
+    "message": ""
+  },
+  "health": "ok"
 }

@@ -1,3 +1,5 @@
+"""대시보드가 읽는 최신 실행 상태와 실패 이력 JSON 파일을 생성합니다."""
+
 import getpass
 import json
 import os
@@ -288,7 +290,7 @@ def _git(*args, cwd=None):
 
 
 def publish_status(logger, paths=None):
-    """Commit and push the dashboard state files when publishing is enabled."""
+    """대시보드 상태 파일 게시가 활성화된 경우 Git 커밋과 푸시를 수행합니다."""
     if not _env_bool("HAVER_GITHUB_PUBLISH_ENABLED", False):
         return {"enabled": False, "committed": False, "pushed": False, "message": "Publishing disabled."}
 

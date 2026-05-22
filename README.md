@@ -66,6 +66,9 @@ HAVER_GITHUB_PUBLISH_ENABLED=false
 HAVER_GITHUB_COMMIT_MESSAGE=Update dashboard state
 HAVER_GITHUB_PUSH_REMOTE=origin
 HAVER_GITHUB_PUSH_BRANCH=
+HAVER_EXCEL_EXPORT_ENABLED=true
+HAVER_EXCEL_OUTPUT_PATH=state/haver_series_export.xlsx
+HAVER_ALLOW_MULTIPLE_RUNS_PER_DAY=false
 DLXPAR=full_path_to_dlx_ini_file
 DLXDB=full_path_to_dlx_database_folder
 ```
@@ -78,6 +81,10 @@ DLXDB=full_path_to_dlx_database_folder
 - `HAVER_REQUIRE_AUTH_READY=true`로 두면 예약 실행 전에 Haver 로그인 상태가 없을 때 바로 중단하고 알람을 보냅니다.
 - `HAVER_ALERT_POPUP=true`는 콘솔 실행 중 즉시 팝업 알림을 띄웁니다. SMTP 값을 채우면 이메일 알림도 보낼 수 있습니다.
 - `HAVER_GITHUB_PUBLISH_ENABLED=true`로 두면 실행 종료 후 `state/haver_status.json`과 `state/haver_events.jsonl`을 GitHub에 커밋/푸시합니다.
+- `HAVER_EXCEL_EXPORT_ENABLED=true`로 두면 수집한 시계열을 주기별 시트로 엑셀 파일에 저장합니다. 각 시트는 `date` 행과 `ticker_pk`/`name` 2단 헤더로 만들어집니다.
+- `HAVER_EXCEL_OUTPUT_PATH`로 엑셀 저장 위치를 바꿀 수 있습니다.
+- `HAVER_ALLOW_MULTIPLE_RUNS_PER_DAY=false`로 두면 같은 날 이미 성공한 실행이 있을 때 Haver/DB 업로드를 다시 수행하지 않습니다.
+- 정책금리 DI는 전체용 `haver_di_policy_rate` 외에, `haver_metadata.database` 기준으로 DM(`g10`)과 EM(`emerge`)을 나눠 `haver_di_policy_rate_dm`, `haver_di_policy_rate_em`도 함께 업로드합니다.
 - `HAVER_NODE_ROLE`은 대시보드에서 이 실행이 회사 PC인지 집 PC인지 구분하는 라벨입니다.
 
 ### 예약 실행용 사전 점검

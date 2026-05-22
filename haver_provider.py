@@ -1,3 +1,5 @@
+"""Haver 클라이언트 초기화, 메타데이터 조회, 시계열 수집을 담당합니다."""
+
 import os
 import warnings
 
@@ -6,7 +8,7 @@ import Haver
 
 try:
     import Haver._Haveraux as Haveraux
-except Exception:  # pragma: no cover - fallback for test stubs
+except Exception:
     Haveraux = None
 
 from run_logging import get_logger, log_event
@@ -43,7 +45,7 @@ def _safe_haver_path():
 
 
 def ensure_database_path(logger=None):
-    """Try to restore a usable Haver database path when one is not already set."""
+    """Haver DB 경로가 비어 있을 때 환경 변수 기반으로 사용 가능한 경로를 복구합니다."""
     current_path = _safe_haver_path()
     if current_path not in ("", None):
         return True, current_path
@@ -101,7 +103,7 @@ def ensure_database_path(logger=None):
 
 
 def get_login_status():
-    """Return a best-effort snapshot of the current Haver login state."""
+    """현재 Haver 로그인 상태를 가능한 범위에서 확인해 반환합니다."""
     direct_state = _safe_direct_state()
     authenticated = getattr(Haveraux, "authenticated_", None) if Haveraux is not None else None
 
@@ -128,7 +130,7 @@ def get_login_status():
 
 
 def log_login_status(status=None, level="info"):
-    """Log the current Haver login status in a consistent format."""
+    """Haver 로그인 상태를 일관된 형식으로 로그에 남깁니다."""
     if status is None:
         status = get_login_status()
 
@@ -156,8 +158,27 @@ def _metadata_request(ticker_list, log_error=True):
     return pd.DataFrame()
 
 
+def _series_request(ticker_list, start_date):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        data = Haver.data(ticker_list, startdate=start_date, dates=True)
+
+    if isinstance(data, dict):
+        log_event(
+            logger,
+            "warning",
+            "Series fetch returned Haver error report",
+            ticker_count=len(ticker_list),
+            start_date=start_date,
+            **_summarize_error_report(data),
+        )
+        raise RuntimeError("Haver series query returned an error report.")
+
+    return data
+
+
 def initialize():
-    """Initialize the Haver client."""
+    """Haver 클라이언트를 초기화합니다."""
     try:
         haver_path = os.getenv("HAVER_PATH", "").strip()
         direct_before = _safe_direct_state()
@@ -187,7 +208,7 @@ def initialize():
 
 
 def preflight_login():
-    """Check whether Haver login is ready without triggering the login prompt."""
+    """로그인 팝업을 직접 띄우지 않고 Haver 사용 가능 상태를 점검합니다."""
     status = get_login_status()
     if not status["ready"]:
         log_event(
@@ -212,13 +233,21 @@ def preflight_login():
 
 
 def fetch_metadata(ticker_list):
-    """Fetch metadata for the requested ticker list."""
+    """요청한 티커 목록의 Haver 메타데이터를 조회합니다."""
     log_event(logger, "info", "Fetching metadata", ticker_count=len(ticker_list))
     try:
         path_ready, path_value = ensure_database_path(logger)
         if not path_ready:
             log_event(logger, "warning", "Proceeding with metadata fetch while Haver database path is unresolved", haver_path=path_value)
-        meta_df = _metadata_request(ticker_list)
+        meta_df = pd.DataFrame()
+        batch_error = None
+
+        try:
+            meta_df = _metadata_request(ticker_list)
+        except Exception as exc:
+            batch_error = exc
+            log_event(logger, "warning", "Metadata batch raised; retrying", error=str(exc))
+
         if meta_df.empty:
             log_event(logger, "warning", "Metadata fetch failed; forcing DLX Direct reconnect and retrying")
             try:
@@ -227,14 +256,23 @@ def fetch_metadata(ticker_list):
                 log_event(logger, "warning", "DLX Direct force reconnect failed", error=str(exc))
             else:
                 log_event(logger, "info", "DLX Direct force reconnect issued", direct_state=_safe_direct_state())
-            meta_df = _metadata_request(ticker_list)
+            try:
+                meta_df = _metadata_request(ticker_list)
+            except Exception as exc:
+                batch_error = exc
+                log_event(logger, "warning", "Metadata batch raised after reconnect", error=str(exc))
 
         if meta_df.empty and len(ticker_list) > 1:
             log_event(logger, "warning", "Metadata batch failed; retrying per ticker", ticker_count=len(ticker_list))
             recovered = []
             failed = []
             for ticker in ticker_list:
-                single_df = _metadata_request([ticker], log_error=False)
+                try:
+                    single_df = _metadata_request([ticker], log_error=False)
+                except Exception as exc:
+                    failed.append(ticker)
+                    log_event(logger, "warning", "Metadata per-ticker request raised", ticker=ticker, error=str(exc))
+                    continue
                 if single_df.empty:
                     failed.append(ticker)
                 else:
@@ -251,6 +289,8 @@ def fetch_metadata(ticker_list):
                 meta_df = pd.concat(recovered, ignore_index=True)
 
         if not isinstance(meta_df, pd.DataFrame) or meta_df.empty:
+            if batch_error is not None:
+                log_event(logger, "warning", "Metadata fetch completed without rows after batch error", error=str(batch_error))
             log_event(logger, "warning", "Metadata fetch returned no rows")
             return pd.DataFrame()
 
@@ -293,10 +333,10 @@ def _build_ticker_pks(meta_df, ticker_list):
 
 
 def fetch_series_data(ticker_chunk, start_date):
-    """Fetch time-series data, falling back to per-ticker requests on chunk failure."""
+    """시계열 데이터를 조회하고, 청크 실패 시 티커별 재시도로 복구합니다."""
     log_event(logger, "info", "Fetching series chunk", ticker_count=len(ticker_chunk), start_date=start_date)
     try:
-        data = Haver.data(ticker_chunk, startdate=start_date, dates=True)
+        data = _series_request(ticker_chunk, start_date)
         processed = _process_haver_data(data, ticker_chunk)
         log_event(logger, "info", "Chunk fetch complete", ticker_count=len(ticker_chunk), rows=len(processed))
         return processed
@@ -314,7 +354,7 @@ def fetch_series_data(ticker_chunk, start_date):
     failed_tickers = []
     for ticker in ticker_chunk:
         try:
-            single_data = Haver.data([ticker], startdate=start_date, dates=True)
+            single_data = _series_request([ticker], start_date)
             processed = _process_haver_data(single_data, [ticker])
             if not processed.empty:
                 combined_results.append(processed)
@@ -339,7 +379,7 @@ def fetch_series_data(ticker_chunk, start_date):
 
 
 def _process_haver_data(data, ticker_names):
-    """Convert Haver data into a long-form dataframe."""
+    """Haver 응답 데이터를 date, ticker_pk, value 구조의 long 데이터프레임으로 변환합니다."""
     if data is None:
         return pd.DataFrame()
 

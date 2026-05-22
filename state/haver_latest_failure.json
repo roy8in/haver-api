@@ -1,14 +1,14 @@
 {
-  "generated_at": "2026-05-04T09:00:33",
+  "generated_at": "2026-05-19T06:01:28",
   "schema_version": 1,
   "project": "haver-api",
-  "record_type": "preflight",
-  "source": "scripts/haver_preflight.py",
-  "run_id": "20260504_090033_11329105",
-  "status": "UNKNOWN",
+  "record_type": "run",
+  "source": "main.py",
+  "run_id": "20260519_060022_701ad705",
+  "status": "FAILED",
   "health": "issue",
-  "error_stage": "",
-  "error_message": "Unable to confirm Haver login readiness before the scheduled sync starts.",
+  "error_stage": "haver_initialize",
+  "error_message": "Haver initialization timed out after 30 seconds on attempt 2.",
   "haver": {
     "authenticated": false,
     "direct_state": false,
@@ -16,30 +16,62 @@
     "ready": false,
     "note": "Haver login state could not be confirmed yet."
   },
-  "metrics": {},
+  "metrics": {
+    "ticker_total": 0,
+    "metadata_rows": 0,
+    "rows_uploaded_metadata": 0,
+    "ticker_skipped": 0,
+    "ticker_backfill": 0,
+    "ticker_fetched": 0,
+    "chunks_total": 0,
+    "chunks_failed": 0,
+    "rows_uploaded_values": 0,
+    "rows_uploaded_di": 0
+  },
   "timings": {
-    "total_sec": "",
-    "stages": {},
-    "slowest_stage": ""
+    "total_sec": 66.22,
+    "stages": {
+      "daily_run_guard": 0.058,
+      "environment_setup": 0.002,
+      "login_preflight": 0.467,
+      "haver_initialize": 65.684,
+      "total": 66.214
+    },
+    "slowest_stage": "total:66.214"
   },
   "failure": {
-    "category": "unknown",
-    "stage": "haver_preflight",
-    "message": "Unable to confirm Haver login readiness before the scheduled sync starts."
+    "category": "timeout",
+    "stage": "haver_initialize",
+    "message": "Haver initialization timed out after 30 seconds on attempt 2."
   },
-  "retry": {},
-  "db": {},
+  "retry": {
+    "enabled": true,
+    "max_attempts": 2,
+    "attempts_used": 2,
+    "timeout_sec": 30,
+    "delay_sec": 5
+  },
+  "db": {
+    "stored_metadata_count": 0,
+    "stored_value_ticker_count": 0,
+    "metadata_table_present": false,
+    "values_table_present": false
+  },
   "alerts": {
     "transports": [],
     "enabled": false
   },
   "files": {
-    "app_log": "D:\\haver_api\\logs\\app_2026-05-04.log",
+    "app_log": "D:\\haver_api\\logs\\app_2026-05-19.log",
     "summary_log": "D:\\haver_api\\logs\\summary_2026-05.csv",
     "status_json": "D:\\haver_api\\state\\haver_status.json",
     "events_jsonl": "D:\\haver_api\\state\\haver_events.jsonl",
     "latest_failure_json": "D:\\haver_api\\state\\haver_latest_failure.json",
     "failure_events_jsonl": "D:\\haver_api\\state\\haver_failures.jsonl"
   },
-  "publish": {}
+  "publish": {
+    "enabled": false,
+    "status": "disabled",
+    "message": ""
+  }
 }

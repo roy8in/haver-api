@@ -1,3 +1,5 @@
+"""원격 PostgreSQL API에 SQL을 전달하고 테이블 생성/업서트를 담당합니다."""
+
 import os
 from pathlib import Path
 
@@ -29,7 +31,7 @@ if not VERIFY_SSL:
 
 
 def setup_environment():
-    """Apply certificate bundle settings for outbound requests."""
+    """외부 DB 요청에 사용할 인증서 번들 설정을 적용합니다."""
     log_event(
         logger,
         "info",
@@ -62,7 +64,7 @@ def _request_verify_value():
 
 
 def send_sql(sql_text):
-    """Send SQL to the PostgreSQL API."""
+    """PostgreSQL API로 SQL 문자열을 전송합니다."""
     if not POSTGRE_API_URL or not POSTGRE_API_KEY:
         log_event(logger, "error", "API URL or key missing in .env")
         return None
@@ -95,7 +97,7 @@ def send_sql(sql_text):
 
 
 def _extract_rows(res):
-    """Extract rows from the API response payload."""
+    """API 응답 payload에서 rows 목록을 추출합니다."""
     if not res or not isinstance(res, dict):
         return []
 
@@ -107,20 +109,39 @@ def _extract_rows(res):
     return []
 
 
-def get_ticker_max_dates():
-    """Return the latest stored date for each ticker."""
-    check_sql = "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'haver_values')"
-    rows = _extract_rows(send_sql(check_sql))
+def _table_exists(table_name):
+    check_sql = f"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = '{table_name}')"
+    res = send_sql(check_sql)
+    if res is None:
+        log_event(logger, "error", "Unable to verify table existence", table_name=table_name)
+        return None
 
+    rows = _extract_rows(res)
     if not rows:
-        return {}
+        log_event(logger, "error", "Table existence query returned no rows", table_name=table_name)
+        return None
+
     try:
-        if not rows[0][0]:
-            return {}
+        return bool(rows[0][0])
     except (IndexError, TypeError):
+        log_event(logger, "error", "Table existence query returned unexpected rows", table_name=table_name, rows=rows)
+        return None
+
+
+def get_ticker_max_dates():
+    """ticker_pk별로 DB에 저장된 최신 날짜를 반환합니다."""
+    exists = _table_exists("haver_values")
+    if exists is None:
+        return None
+    if not exists:
         return {}
 
-    result_rows = _extract_rows(send_sql("SELECT ticker_pk, MAX(date) FROM haver_values GROUP BY ticker_pk"))
+    res = send_sql("SELECT ticker_pk, MAX(date) FROM haver_values GROUP BY ticker_pk")
+    if res is None:
+        log_event(logger, "error", "Unable to load ticker max dates")
+        return None
+
+    result_rows = _extract_rows(res)
     max_dates = {}
     for row in result_rows:
         if not isinstance(row, (list, tuple)) or len(row) < 2:
@@ -131,19 +152,19 @@ def get_ticker_max_dates():
 
 
 def get_stored_metadata():
-    """Return stored datetimemod values by ticker."""
-    check_sql = "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'haver_metadata')"
-    rows = _extract_rows(send_sql(check_sql))
-
-    if not rows:
-        return {}
-    try:
-        if not rows[0][0]:
-            return {}
-    except (IndexError, TypeError):
+    """저장된 메타데이터 수정시각을 ticker_pk 기준으로 반환합니다."""
+    exists = _table_exists("haver_metadata")
+    if exists is None:
+        return None
+    if not exists:
         return {}
 
-    result_rows = _extract_rows(send_sql('SELECT "ticker_pk", "datetimemod" FROM haver_metadata'))
+    res = send_sql('SELECT "ticker_pk", "datetimemod" FROM haver_metadata')
+    if res is None:
+        log_event(logger, "error", "Unable to load stored metadata")
+        return None
+
+    result_rows = _extract_rows(res)
     metadata = {}
     for row in result_rows:
         if not isinstance(row, (list, tuple)) or len(row) < 2:
@@ -153,8 +174,51 @@ def get_stored_metadata():
     return metadata
 
 
+def _normalize_ticker_values(tickers):
+    normalized = []
+    seen = set()
+
+    for ticker in tickers:
+        value = str(ticker).strip()
+        if not value or value.lower() in {"none", "nan", "nat"}:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+
+    return normalized
+
+
+def prune_rows_not_in_tickers(table_name, tickers, column_name="ticker_pk"):
+    """현재 티커 목록에 없는 ticker_pk 행을 대상 테이블에서 삭제합니다."""
+    if column_name != "ticker_pk":
+        raise ValueError("prune_rows_not_in_tickers only supports the ticker_pk column")
+
+    keep_tickers = _normalize_ticker_values(tickers)
+    if keep_tickers:
+        keep_sql = ", ".join(_to_sql_literal(ticker) for ticker in keep_tickers)
+        delete_sql = f'DELETE FROM {table_name} WHERE "{column_name}" NOT IN ({keep_sql})'
+    else:
+        delete_sql = f"DELETE FROM {table_name}"
+
+    res = send_sql(delete_sql)
+    if res is None:
+        log_event(logger, "error", "Failed to prune table by ticker list", table_name=table_name)
+        return False
+
+    log_event(
+        logger,
+        "info",
+        "Pruned table by ticker list",
+        table_name=table_name,
+        keep_count=len(keep_tickers),
+    )
+    return True
+
+
 def create_table_with_types(df, table_name):
-    """Create a table based on inferred pandas dtypes."""
+    """pandas dtype을 바탕으로 대상 테이블을 생성합니다."""
     columns_sql = []
     for col_name, dtype in df.dtypes.items():
         col_lower = col_name.lower()
@@ -177,7 +241,7 @@ def create_table_with_types(df, table_name):
         columns_sql.append(f'"{col_name}" {sql_type}')
 
     pk_constraint = ""
-    if table_name in {"haver_values", "haver_diff3m_policy_rate"}:
+    if table_name in {"haver_values", "haver_diff3m_policy_rate"} or table_name.startswith("haver_inflation_"):
         pk_constraint = ', PRIMARY KEY ("ticker_pk", "date")'
     elif table_name.startswith("haver_di_"):
         pk_constraint = ', PRIMARY KEY ("date")'
@@ -207,7 +271,7 @@ def _to_sql_literal(val):
 def _conflict_target_for(table_name):
     if table_name == "haver_metadata":
         return '"ticker_pk"'
-    if table_name in {"haver_values", "haver_diff3m_policy_rate"}:
+    if table_name in {"haver_values", "haver_diff3m_policy_rate"} or table_name.startswith("haver_inflation_"):
         return '"ticker_pk", "date"'
     if table_name.startswith("haver_di_"):
         return '"date"'
@@ -215,7 +279,7 @@ def _conflict_target_for(table_name):
 
 
 def upsert_data(df, table_name, chunk_size=1000):
-    """Upsert dataframe rows into the target table."""
+    """데이터프레임 행을 대상 테이블에 upsert합니다."""
     if df.empty:
         log_event(logger, "warning", "Skipping upsert for empty dataframe", table_name=table_name)
         return 0

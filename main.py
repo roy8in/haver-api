@@ -1,3 +1,6 @@
+"""Haver 데이터 수집, DB 업로드, 후처리, 상태 기록을 순서대로 실행하는 메인 스크립트입니다."""
+
+import csv
 import os
 import sys
 import threading
@@ -11,15 +14,24 @@ from alerts import send_alert
 import dashboard_state
 import data_processor as processor
 import db_handler as db
+import excel_export
 import haver_provider as haver
 from run_logging import append_summary, log_event, setup_run_logging
 
 
 BASE_DIR = Path(__file__).resolve().parent
+TICKER_AWARE_DB_TABLES = [
+    "haver_metadata",
+    "haver_values",
+    "haver_diff3m_policy_rate",
+    "haver_inflation_mom",
+    "haver_inflation_yoy",
+    "haver_inflation_3m_annualized",
+]
 
 
 def _standardize_mod(val):
-    """Normalize Haver metadata timestamps before comparing."""
+    """Haver 메타데이터 수정시각을 비교 가능한 문자열로 정규화합니다."""
     if val is None:
         return ""
 
@@ -46,13 +58,13 @@ def _parse_metadata_date(value, default_value):
 
 
 def _call_with_timeout(func, timeout_seconds, label):
-    """Run a callable in a daemon thread and return (result, timed_out)."""
+    """함수를 데몬 스레드에서 실행하고 결과, 타임아웃 여부, 오류를 반환합니다."""
     outcome = {"result": None, "error": None}
 
     def runner():
         try:
             outcome["result"] = func()
-        except Exception as exc:  # pragma: no cover - defensive wrapper
+        except Exception as exc:
             outcome["error"] = exc
 
     thread = threading.Thread(target=runner, name=label, daemon=True)
@@ -86,16 +98,90 @@ def _get_bool_env(name, default=False):
     return raw_value in {"1", "true", "yes", "on"}
 
 
+def _get_cli_flag(flag_name):
+    return flag_name in sys.argv[1:]
+
+
+def _has_successful_run_on_date(summary_log_path, target_date):
+    summary_path = Path(summary_log_path)
+    if not summary_path.exists():
+        return False
+
+    try:
+        with summary_path.open("r", encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                if row.get("status") != "SUCCESS":
+                    continue
+                started = pd.to_datetime(row.get("start_time", ""), errors="coerce")
+                if pd.isna(started):
+                    continue
+                if started.date() == target_date:
+                    return True
+    except OSError:
+        return False
+
+    return False
+
+
 def _record_stage_timing(summary, stage_name, started_at):
     elapsed = round(time.perf_counter() - started_at, 3)
     summary.setdefault("stage_timings_sec", {})[stage_name] = elapsed
     return time.perf_counter()
 
 
+def _ticker_series_part(ticker):
+    ticker = str(ticker).strip()
+    if not ticker or "@" not in ticker:
+        return ""
+
+    ticker = ticker.split("@", 1)[0]
+    if "%" in ticker:
+        ticker = ticker.split("%", 1)[0]
+    if "(" in ticker:
+        ticker = ticker.split("(", 1)[0]
+
+    return ticker.strip()
+
+
+def _filter_valid_tickers(ticker_list, logger=None):
+    """Haver 조회 전에 빈 값과 구조적으로 잘못된 티커를 제외합니다."""
+    valid_tickers = []
+    skipped_tickers = []
+
+    for ticker in ticker_list:
+        normalized = str(ticker).strip()
+        if normalized.lower() in {"", "none", "nan", "nat"}:
+            continue
+
+        if "@" not in normalized:
+            valid_tickers.append(normalized)
+            continue
+
+        series_part = _ticker_series_part(normalized)
+        if not series_part or len(series_part) > 8:
+            skipped_tickers.append(normalized)
+            continue
+
+        valid_tickers.append(normalized)
+
+    if skipped_tickers and logger is not None:
+        log_event(
+            logger,
+            "warning",
+            "Skipped invalid ticker codes before metadata fetch",
+            skipped_count=len(skipped_tickers),
+            skipped_sample=", ".join(skipped_tickers[:20]),
+        )
+
+    return valid_tickers, skipped_tickers
+
+
 def _classify_failure(error_stage, error_message, login_required=False):
     message = (error_message or "").lower()
     stage = (error_stage or "").lower()
 
+    if stage == "ticker_validation":
+        return "ticker_validation_failed"
     if login_required or stage == "haver_preflight" or "authentication failed" in message:
         return "login_required"
     if stage == "haver_initialize" and "timed out" in message:
@@ -162,7 +248,7 @@ def _alert_haver_login_issue(logger, message, **context):
     return send_alert(logger, "Haver login required", message, **context)
 
 
-def _build_sync_tasks(meta_df, db_metadata, db_max_dates):
+def _build_sync_tasks(meta_df, db_metadata, db_max_dates, full_refresh=False):
     end_col = next((c for c in ["enddate", "end", "finish", "last"] if c in meta_df.columns), None)
     start_col = next((c for c in ["startdate", "start", "begin"] if c in meta_df.columns), None)
 
@@ -179,12 +265,14 @@ def _build_sync_tasks(meta_df, db_metadata, db_max_dates):
         m_end = _parse_metadata_date(row[end_col], datetime.now()) if end_col else pd.Timestamp(datetime.now())
 
         db_last = None
-        if pk in db_max_dates:
+        if not full_refresh and pk in db_max_dates:
             parsed_db_last = pd.to_datetime(db_max_dates.get(pk), errors="coerce")
             if not pd.isna(parsed_db_last):
                 db_last = parsed_db_last
 
-        if db_last is None:
+        if full_refresh:
+            fetch_start = m_start
+        elif db_last is None:
             fetch_start = m_start
         else:
             fetch_start = db_last - timedelta(days=180)
@@ -205,7 +293,175 @@ def _build_sync_tasks(meta_df, db_metadata, db_max_dates):
     return sync_tasks, skipped_up_to_date, kept_for_backfill
 
 
+def _cleanup_removed_tickers(meta_df, logger, summary):
+    if meta_df is None or meta_df.empty or "ticker_pk" not in meta_df.columns:
+        return True
+
+    success = True
+    keep_tickers = (
+        meta_df["ticker_pk"]
+        .dropna()
+        .astype(str)
+        .map(str.strip)
+        .loc[lambda s: s != ""]
+        .drop_duplicates()
+        .tolist()
+    )
+
+    for table_name in TICKER_AWARE_DB_TABLES:
+        if not db.prune_rows_not_in_tickers(table_name, keep_tickers):
+            success = False
+
+    summary["ticker_cleanup_count"] = len(keep_tickers)
+    log_event(
+        logger,
+        "info",
+        "Pruned DB tables to match current ticker list",
+        ticker_count=len(keep_tickers),
+        table_count=len(TICKER_AWARE_DB_TABLES),
+    )
+    return success
+
+
+def _freq_label(value):
+    if pd.isna(value) or str(value).strip() == "":
+        return "ALL"
+    return str(value).strip()
+
+
+def _build_excel_full_export_tasks(meta_df):
+    start_col = next((c for c in ["startdate", "start", "begin"] if c in meta_df.columns), None)
+
+    full_tasks = []
+    for _, row in meta_df.iterrows():
+        if "ticker_pk" not in row or pd.isna(row["ticker_pk"]):
+            continue
+
+        start_value = _parse_metadata_date(row[start_col], "1900-01-01") if start_col else pd.Timestamp("1900-01-01")
+        full_tasks.append(
+            {
+                "pk": row["ticker_pk"],
+                "freq": _freq_label(row.get("frequency", row.get("freq", "ALL"))),
+                "start": start_value,
+            }
+        )
+
+    return full_tasks
+
+
+def _fetch_excel_full_export_frames(meta_df, logger, chunk_size=50):
+    full_tasks = _build_excel_full_export_tasks(meta_df)
+    if not full_tasks:
+        return {}, 0
+
+    full_frames_by_freq = {}
+    failed_chunks = 0
+    task_df = pd.DataFrame(full_tasks).sort_values("start")
+
+    for freq, group in task_df.groupby("freq"):
+        freq_label = _freq_label(freq)
+        tickers_in_freq = group.to_dict("records")
+        total_count = len(tickers_in_freq)
+        log_event(logger, "info", "Building full Excel baseline from Haver", frequency=freq_label, ticker_count=total_count)
+
+        for i in range(0, total_count, chunk_size):
+            chunk_tasks = tickers_in_freq[i:i + chunk_size]
+            chunk_tickers = [task["pk"] for task in chunk_tasks]
+            min_start = min(task["start"] for task in chunk_tasks).strftime("%Y-%m-%d")
+
+            log_event(
+                logger,
+                "info",
+                "Fetching full Excel baseline chunk",
+                frequency=freq_label,
+                chunk_index=i // chunk_size + 1,
+                chunk_size=len(chunk_tickers),
+                min_start=min_start,
+            )
+            long_df = haver.fetch_series_data(chunk_tickers, min_start)
+            if long_df.empty:
+                failed_chunks += 1
+                log_event(
+                    logger,
+                    "error",
+                    "Full Excel baseline chunk returned no data",
+                    frequency=freq_label,
+                    chunk_index=i // chunk_size + 1,
+                )
+                continue
+
+            full_frames_by_freq.setdefault(freq_label, []).append(long_df)
+
+    return full_frames_by_freq, failed_chunks
+
+
+def _write_excel_export(meta_df, series_frames_by_freq, excel_export_path, logger, summary, full_refresh=False):
+    summary["excel_export_status"] = "enabled"
+    merge_existing = True
+
+    try:
+        missing_excel_sheets = excel_export.get_missing_frequency_sheets(meta_df, excel_export_path)
+        if not series_frames_by_freq and not missing_excel_sheets and excel_export_path.exists():
+            summary["excel_export_status"] = "unchanged"
+            log_event(
+                logger,
+                "info",
+                "Excel export already up to date; no series updates to apply",
+                output_path=str(excel_export_path),
+            )
+            return True
+        if missing_excel_sheets:
+            merge_existing = False
+            log_event(
+                logger,
+                "info",
+                "Excel export is missing frequency sheets; rebuilding full workbook from Haver",
+                output_path=str(excel_export_path),
+                missing_sheets=", ".join(missing_excel_sheets),
+            )
+            full_frames_by_freq, failed_full_export_chunks = _fetch_excel_full_export_frames(meta_df, logger)
+            if failed_full_export_chunks:
+                summary["excel_export_status"] = "failed"
+                summary["error_stage"] = "excel_export"
+                summary["error_message"] = f"{failed_full_export_chunks} full Excel baseline chunk(s) failed."
+                summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], False)
+                log_event(logger, "error", summary["error_message"])
+                return False
+            series_frames_by_freq = full_frames_by_freq
+
+        export_result = excel_export.export_series_workbook(
+            meta_df,
+            series_frames_by_freq,
+            excel_export_path,
+            merge_existing=merge_existing and not full_refresh,
+        )
+        summary["excel_export_status"] = "written" if export_result.get("written") else "skipped"
+        if not export_result.get("written"):
+            log_event(
+                logger,
+                "warning",
+                "Excel export skipped because there were no frames to write",
+                output_path=str(excel_export_path),
+            )
+    except Exception as exc:
+        summary["excel_export_status"] = "failed"
+        summary["error_stage"] = "excel_export"
+        summary["error_message"] = str(exc)
+        summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], False)
+        log_event(
+            logger,
+            "error",
+            "Excel export failed",
+            output_path=str(excel_export_path),
+            error=str(exc),
+        )
+        return False
+
+    return True
+
+
 def run_sync():
+    """전체 Haver 동기화 절차를 실행합니다."""
     run_context = setup_run_logging()
     logger = run_context["logger"]
     init_timeout = int(os.getenv("HAVER_INIT_TIMEOUT_SECONDS", "30"))
@@ -216,6 +472,10 @@ def run_sync():
     alert_transports = []
     publish_enabled = _get_bool_env("HAVER_GITHUB_PUBLISH_ENABLED", False)
     publish_result = {"enabled": publish_enabled, "committed": False, "pushed": False, "message": "Publishing disabled."}
+    excel_export_enabled = _get_bool_env("HAVER_EXCEL_EXPORT_ENABLED", True)
+    full_refresh = _get_bool_env("HAVER_FULL_REFRESH", False) or _get_cli_flag("--full-refresh")
+    excel_export_path = Path(os.getenv("HAVER_EXCEL_OUTPUT_PATH", str(BASE_DIR / "state" / "haver_series_export.xlsx")))
+    allow_multiple_daily_runs = _get_bool_env("HAVER_ALLOW_MULTIPLE_RUNS_PER_DAY", False)
     summary = {
         "run_id": run_context["run_id"],
         "start_time": run_context["run_started_at"].isoformat(timespec="seconds"),
@@ -245,6 +505,10 @@ def run_sync():
         "values_table_present": False,
         "publish_status": "",
         "publish_message": "",
+        "excel_export_status": "",
+        "excel_export_path": str(excel_export_path),
+        "allow_multiple_daily_runs": allow_multiple_daily_runs,
+        "full_refresh": full_refresh,
     }
     run_started_perf = time.perf_counter()
 
@@ -262,9 +526,29 @@ def run_sync():
         haver_init_attempts=init_attempts,
         haver_init_retry_delay_sec=init_retry_delay,
         haver_require_auth_ready=require_auth_ready,
+        full_refresh=full_refresh,
     )
 
     try:
+        summary["error_stage"] = "daily_run_guard"
+        stage_started = time.perf_counter()
+        already_ran_today = _has_successful_run_on_date(
+            run_context["summary_log_path"],
+            run_context["run_started_at"].date(),
+        )
+        stage_started = _record_stage_timing(summary, "daily_run_guard", stage_started)
+        if already_ran_today and not allow_multiple_daily_runs and not full_refresh:
+            summary["status"] = "SUCCESS"
+            summary["error_stage"] = ""
+            summary["excel_export_status"] = "skipped"
+            log_event(
+                logger,
+                "info",
+                "Skipping sync because a successful run already completed today",
+                run_date=run_context["run_started_at"].date().isoformat(),
+            )
+            return True
+
         summary["error_stage"] = "environment_setup"
         stage_started = time.perf_counter()
         db.setup_environment()
@@ -335,13 +619,42 @@ def run_sync():
         tickers_csv = pd.read_csv(BASE_DIR / "tickers.csv")
         ticker_list = tickers_csv["ticker"].tolist()
         summary["ticker_total"] = len(ticker_list)
+        ticker_list, invalid_tickers = _filter_valid_tickers(ticker_list, logger)
+        summary["ticker_invalid"] = len(invalid_tickers)
         stage_started = _record_stage_timing(summary, "ticker_load", stage_started)
-        log_event(logger, "info", "Loaded tickers.csv", ticker_total=summary["ticker_total"])
+        if invalid_tickers:
+            summary["error_stage"] = "ticker_validation"
+            summary["error_message"] = (
+                f"{len(invalid_tickers)} invalid ticker(s) found in tickers.csv. "
+                "Fix them before rerunning main.py."
+            )
+            summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], False)
+            log_event(
+                logger,
+                "error",
+                summary["error_message"],
+                invalid_count=len(invalid_tickers),
+                invalid_sample=", ".join(invalid_tickers[:20]),
+            )
+            return False
+        log_event(
+            logger,
+            "info",
+            "Loaded tickers.csv",
+            ticker_total=summary["ticker_total"],
+            ticker_valid=len(ticker_list),
+            ticker_invalid=summary["ticker_invalid"],
+        )
 
         summary["error_stage"] = "db_state_load"
         stage_started = time.perf_counter()
         db_metadata = db.get_stored_metadata()
         db_max_dates = db.get_ticker_max_dates()
+        if db_metadata is None or db_max_dates is None:
+            summary["error_message"] = "DB state could not be loaded; aborting before Haver upload decisions."
+            summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], False)
+            log_event(logger, "error", summary["error_message"])
+            return False
         summary["stored_metadata_count"] = len(db_metadata)
         summary["stored_value_ticker_count"] = len(db_max_dates)
         summary["metadata_table_present"] = bool(db_metadata)
@@ -364,9 +677,9 @@ def run_sync():
         db.create_table_with_types(meta_df, "haver_metadata")
         summary["rows_uploaded_metadata"] = db.upsert_data(meta_df, "haver_metadata")
         stage_started = _record_stage_timing(summary, "metadata_upload", stage_started)
-        if summary["rows_uploaded_metadata"] == 0:
+        if summary["rows_uploaded_metadata"] != len(meta_df):
             summary["error_stage"] = "metadata_upload"
-            summary["error_message"] = "Metadata upload failed; DB API accepted 0 rows."
+            summary["error_message"] = f"Metadata upload incomplete; uploaded {summary['rows_uploaded_metadata']} of {len(meta_df)} rows."
             summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], False)
             log_event(logger, "error", summary["error_message"])
             return False
@@ -378,9 +691,18 @@ def run_sync():
             rows_uploaded_metadata=summary["rows_uploaded_metadata"],
         )
 
+        summary["error_stage"] = "ticker_cleanup"
+        stage_started = time.perf_counter()
+        if not _cleanup_removed_tickers(meta_df, logger, summary):
+            summary["error_message"] = "Failed to prune one or more DB tables to the current ticker list."
+            summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], False)
+            log_event(logger, "error", summary["error_message"])
+            return False
+        stage_started = _record_stage_timing(summary, "ticker_cleanup", stage_started)
+
         summary["error_stage"] = "task_build"
         stage_started = time.perf_counter()
-        sync_tasks, skipped_up_to_date, kept_for_backfill = _build_sync_tasks(meta_df, db_metadata, db_max_dates)
+        sync_tasks, skipped_up_to_date, kept_for_backfill = _build_sync_tasks(meta_df, db_metadata, db_max_dates, full_refresh=full_refresh)
         stage_started = _record_stage_timing(summary, "task_build", stage_started)
         summary["ticker_skipped"] = skipped_up_to_date
         summary["ticker_backfill"] = kept_for_backfill
@@ -396,6 +718,11 @@ def run_sync():
 
         task_df = pd.DataFrame(sync_tasks)
         if task_df.empty:
+            if excel_export_enabled:
+                if not _write_excel_export(meta_df, {}, excel_export_path, logger, summary):
+                    return False
+            else:
+                summary["excel_export_status"] = "disabled"
             summary["status"] = "SUCCESS"
             summary["error_stage"] = ""
             log_event(logger, "info", "Everything is up-to-date. No data to fetch.")
@@ -404,11 +731,13 @@ def run_sync():
         summary["error_stage"] = "series_fetch"
         stage_started = time.perf_counter()
         task_df = task_df.sort_values("start")
+        series_frames_by_freq = {}
 
         for freq, group in task_df.groupby("freq"):
             tickers_in_freq = group.to_dict("records")
             total_count = len(tickers_in_freq)
-            log_event(logger, "info", "Processing frequency group", frequency=freq, ticker_count=total_count)
+            freq_label = "ALL" if pd.isna(freq) or str(freq).strip() == "" else str(freq)
+            log_event(logger, "info", "Processing frequency group", frequency=freq_label, ticker_count=total_count)
 
             chunk_size = 50
             for i in range(0, total_count, chunk_size):
@@ -421,7 +750,7 @@ def run_sync():
                     logger,
                     "info",
                     "Fetching chunk",
-                    frequency=freq,
+                    frequency=freq_label,
                     chunk_index=i // chunk_size + 1,
                     chunk_size=len(chunk_tickers),
                     min_start=min_start,
@@ -434,40 +763,37 @@ def run_sync():
                         logger,
                         "warning",
                         "No data fetched for chunk",
-                        frequency=freq,
+                        frequency=freq_label,
                         chunk_index=i // chunk_size + 1,
                     )
                     continue
 
+                series_frames_by_freq.setdefault(freq_label, []).append(long_df)
+
                 db.create_table_with_types(long_df, "haver_values")
                 uploaded = db.upsert_data(long_df, "haver_values")
                 summary["rows_uploaded_values"] += uploaded
-                if uploaded == 0:
+                if uploaded != len(long_df):
                     summary["chunks_failed"] += 1
                     log_event(
                         logger,
                         "error",
                         "Chunk upload failed",
-                        frequency=freq,
+                        frequency=freq_label,
                         chunk_index=i // chunk_size + 1,
+                        rows_uploaded=uploaded,
+                        expected_rows=len(long_df),
                     )
                 else:
                     log_event(
                         logger,
                         "info",
                         "Chunk upload complete",
-                        frequency=freq,
+                        frequency=freq_label,
                         chunk_index=i // chunk_size + 1,
                         rows_uploaded=uploaded,
                     )
         stage_started = _record_stage_timing(summary, "series_fetch", stage_started)
-
-        summary["error_stage"] = "processing"
-        stage_started = time.perf_counter()
-        processing_stats = processor.run_processing()
-        stage_started = _record_stage_timing(summary, "processing", stage_started)
-        summary["rows_uploaded_di"] = processing_stats.get("rows_uploaded_di", 0)
-        log_event(logger, "info", "Derived processing complete", rows_uploaded_di=summary["rows_uploaded_di"])
 
         if summary["chunks_failed"]:
             summary["error_stage"] = "series_upload"
@@ -475,6 +801,19 @@ def run_sync():
             summary["failure_category"] = _classify_failure(summary["error_stage"], summary["error_message"], False)
             log_event(logger, "error", summary["error_message"])
             return False
+
+        if excel_export_enabled:
+            if not _write_excel_export(meta_df, series_frames_by_freq, excel_export_path, logger, summary, full_refresh=full_refresh):
+                return False
+        else:
+            summary["excel_export_status"] = "disabled"
+
+        summary["error_stage"] = "processing"
+        stage_started = time.perf_counter()
+        processing_stats = processor.run_processing()
+        stage_started = _record_stage_timing(summary, "processing", stage_started)
+        summary["rows_uploaded_di"] = processing_stats.get("rows_uploaded_di", 0)
+        log_event(logger, "info", "Derived processing complete", rows_uploaded_di=summary["rows_uploaded_di"])
 
         summary["status"] = "SUCCESS"
         summary["error_stage"] = ""

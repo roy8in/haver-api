@@ -1,3 +1,5 @@
+"""실행 실패나 로그인 문제를 로그, 팝업, 이메일로 알립니다."""
+
 import ctypes
 import os
 import smtplib
@@ -59,7 +61,7 @@ def _send_email(subject, message, extra_lines=None):
 
 
 def send_alert(logger, subject, message, **context):
-    """Send an alert via log, popup, and/or SMTP email."""
+    """로그, 팝업, SMTP 이메일 중 설정된 경로로 알림을 전송합니다."""
     log_event(logger, "error", subject, alert_message=message, **context)
 
     transports = []

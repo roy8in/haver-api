@@ -1,3 +1,5 @@
+"""동기화 실행 로그와 월별 요약 CSV 기록을 관리합니다."""
+
 import csv
 import logging
 import sys

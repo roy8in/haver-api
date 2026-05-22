@@ -1,3 +1,5 @@
+"""예약 실행 전에 Haver 로그인 상태를 점검하고 대시보드 상태 파일을 갱신합니다."""
+
 import sys
 from pathlib import Path
 
